@@ -1,0 +1,7 @@
+# Build artifacts
+/target
+
+# rustfmt backup files
+**/*.rs.bk
+
+/.claude/
