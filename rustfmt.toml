@@ -1,0 +1,4 @@
+# Stable rustfmt options only, so `cargo fmt` is deterministic on the pinned
+# toolchain. (Nightly-only knobs like imports_granularity are intentionally absent.)
+edition = "2024"
+newline_style = "Unix"

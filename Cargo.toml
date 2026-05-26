@@ -6,4 +6,10 @@ description = "Micropayment proxy for the Brave Search API over x402 and MPP"
 license = "MPL-2.0"
 publish = false
 
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
 [dependencies]
