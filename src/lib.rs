@@ -1,6 +1,6 @@
 //! `bx402` — a micropayment proxy for the Brave Search API over x402 and MPP.
 //!
-//! The name combines `bx` (Brave's Search CLI) with HTTP `402 Payment Required`,
+//! The name combines `bx` (Brave Search CLI) with HTTP `402 Payment Required`,
 //! the status code behind the per-request payment handshake.
 //!
 
