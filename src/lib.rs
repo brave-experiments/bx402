@@ -4,9 +4,20 @@
 //! the status code behind the per-request payment handshake.
 //!
 
+use axum::Router;
+
 /// Human-readable service banner, printed on startup.
 pub fn banner() -> String {
     format!("bx402 v{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Build the HTTP application.
+///
+/// Returns a `Router` rather than serving it, so tests can drive the same
+/// router as the binary via `tower::ServiceExt::oneshot` without binding a
+/// socket.
+pub fn app() -> Router {
+    Router::new()
 }
 
 #[cfg(test)]
