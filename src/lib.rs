@@ -4,7 +4,7 @@
 //! the status code behind the per-request payment handshake.
 //!
 
-use axum::Router;
+use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
 
 /// Human-readable service banner, printed on startup.
 pub fn banner() -> String {
@@ -17,7 +17,12 @@ pub fn banner() -> String {
 /// router as the binary via `tower::ServiceExt::oneshot` without binding a
 /// socket.
 pub fn app() -> Router {
-    Router::new()
+    Router::new().route("/health", get(health))
+}
+
+/// Liveness probe — returns `200 OK` with an empty body if the server is up.
+async fn health() -> impl IntoResponse {
+    StatusCode::OK
 }
 
 #[cfg(test)]
