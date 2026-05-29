@@ -7,7 +7,9 @@
 use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
 
 mod config;
+mod error;
 pub use config::Config;
+pub use error::AppError;
 
 /// Human-readable service banner, printed on startup.
 pub fn banner() -> String {
