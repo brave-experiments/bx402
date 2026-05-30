@@ -2,6 +2,8 @@
 
 use std::env;
 
+use crate::AppError;
+
 /// Default base URL when `BRAVE_SEARCH_API_BASE_URL` is unset.
 const DEFAULT_BRAVE_SEARCH_API_BASE_URL: &str = "https://api.search.brave.com";
 
@@ -19,11 +21,11 @@ impl Config {
     ///
     /// `BRAVE_SEARCH_API_KEY` is required; a missing or non-Unicode value is an
     /// error. `BRAVE_SEARCH_API_BASE_URL` is optional and defaults to
-    /// [`DEFAULT_BRAVE_SEARCH_API_BASE_URL`]. Returns a human-readable message
-    /// on failure.
-    pub fn from_env() -> Result<Self, String> {
+    /// [`DEFAULT_BRAVE_SEARCH_API_BASE_URL`]. Returns [`AppError::Config`] naming
+    /// the missing variable on failure.
+    pub fn from_env() -> Result<Self, AppError> {
         let brave_search_api_key = env::var("BRAVE_SEARCH_API_KEY")
-            .map_err(|_| "BRAVE_SEARCH_API_KEY must be set".to_string())?;
+            .map_err(|_| AppError::Config("BRAVE_SEARCH_API_KEY"))?;
         let brave_search_api_base_url = env::var("BRAVE_SEARCH_API_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_BRAVE_SEARCH_API_BASE_URL.to_string());
         Ok(Self {
