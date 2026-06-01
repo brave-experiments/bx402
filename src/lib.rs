@@ -6,6 +6,9 @@
 
 use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
 
+mod config;
+pub use config::Config;
+
 /// Human-readable service banner, printed on startup.
 pub fn banner() -> String {
     format!("bx402 v{}", env!("CARGO_PKG_VERSION"))
