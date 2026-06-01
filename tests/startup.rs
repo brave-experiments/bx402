@@ -6,7 +6,10 @@ use std::process::Command;
 /// message (not the `Debug` form) and a non-zero exit code.
 #[test]
 fn missing_api_key_reports_clear_message_and_exits_nonzero() {
+    // Run from the temp dir so a local `.env` (loaded via `dotenvy` from the
+    // cwd) can't supply the key and defeat this test.
     let output = Command::new(env!("CARGO_BIN_EXE_bx402"))
+        .current_dir(std::env::temp_dir())
         .env_remove("BRAVE_SEARCH_API_KEY")
         .output()
         .expect("failed to run the bx402 binary");

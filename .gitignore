@@ -5,3 +5,8 @@
 **/*.rs.bk
 
 /.claude/
+
+# Local dev environment — never commit secrets
+.env
+.env.*
+!.env.example
