@@ -13,6 +13,7 @@ use axum::{
         HeaderMap, StatusCode,
         header::{ACCEPT, CONTENT_TYPE},
     },
+    middleware,
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -56,7 +57,10 @@ pub fn app(config: Config) -> Router {
     };
     Router::new()
         .route("/health", get(health))
-        .route(WEB_SEARCH_PATH, get(search))
+        .route(
+            WEB_SEARCH_PATH,
+            get(search).layer(middleware::from_fn(dispatch::dispatch)),
+        )
         .with_state(state)
 }
 
@@ -127,6 +131,21 @@ mod tests {
             .unwrap()
     }
 
+    /// Like [`get`], but carries an x402 payment header so the request passes the
+    /// dispatch gate via the x402 rail and reaches the proxy handler.
+    async fn get_with_x402(config: Config, uri: &str) -> axum::response::Response {
+        app(config)
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("payment-signature", "test-proof")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
     #[test]
     fn banner_includes_name_and_version() {
         let banner = banner();
@@ -158,7 +177,8 @@ mod tests {
             .mount(&upstream)
             .await;
 
-        let response = get(test_config(upstream.uri()), "/res/v1/web/search?q=rust").await;
+        let response =
+            get_with_x402(test_config(upstream.uri()), "/res/v1/web/search?q=rust").await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
@@ -175,7 +195,8 @@ mod tests {
             .mount(&upstream)
             .await;
 
-        let response = get(test_config(upstream.uri()), "/res/v1/web/search?q=rust").await;
+        let response =
+            get_with_x402(test_config(upstream.uri()), "/res/v1/web/search?q=rust").await;
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
@@ -187,7 +208,7 @@ mod tests {
         // Nothing listens on port 1, so reqwest returns a transport error,
         // which the handler maps to 502 via `AppError::Upstream` — distinct from
         // an upstream that responds with a 5xx (relayed as-is, test above).
-        let response = get(
+        let response = get_with_x402(
             test_config("http://127.0.0.1:1".to_string()),
             "/res/v1/web/search?q=rust",
         )

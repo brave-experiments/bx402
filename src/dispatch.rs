@@ -8,15 +8,16 @@
 //! - **MPP**: an MPP payment attempt
 //! - **collision** (both rails at once): rejected with `400`
 
-// TODO: remove once the request path uses these.
-#![allow(dead_code)]
-
 use axum::{
     Json,
+    extract::Request,
     http::{HeaderMap, StatusCode, header},
+    middleware::Next,
     response::{IntoResponse, Response},
 };
 use serde_json::json;
+
+use crate::AppError;
 
 /// x402 V2 carries its payment proof in the `PAYMENT-SIGNATURE` request header.
 /// V1's `X-PAYMENT` is deliberately not recognized: the service is V2-only, so a
@@ -80,6 +81,22 @@ fn cold_402() -> Response {
         Json(x402_requirements),
     )
         .into_response()
+}
+
+/// Collision `400`: both rails presented at once. Reuses the `AppError` envelope.
+fn collision_400() -> Response {
+    AppError::BadRequest("send exactly one payment rail, not both".into()).into_response()
+}
+
+/// Dispatch middleware for the paid route: classify by payment headers, then either
+/// short-circuit a cold request with `402` or a rail collision with `400`, or pass a
+/// payment attempt through to the handler. Verifying the payment is the rails' job.
+pub(crate) async fn dispatch(req: Request, next: Next) -> Response {
+    match classify(req.headers()) {
+        Rail::None => cold_402(),
+        Rail::Both => collision_400(),
+        Rail::X402 | Rail::Mpp => next.run(req).await,
+    }
 }
 
 #[cfg(test)]
