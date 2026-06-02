@@ -110,6 +110,7 @@ async fn search(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatch::Rail;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -123,25 +124,29 @@ mod tests {
         }
     }
 
-    /// Drive `app()` for a `GET` against `uri` and return the response.
-    async fn get(config: Config, uri: &str) -> axum::response::Response {
-        app(config)
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap()
+    /// The request headers a [`Rail`] state sends. Values are arbitrary; dispatch keys
+    /// only on header presence.
+    fn headers_for(rail: Rail) -> Vec<(&'static str, &'static str)> {
+        match rail {
+            Rail::None => vec![],
+            Rail::X402 => vec![("payment-signature", "test-proof")],
+            Rail::Mpp => vec![("authorization", "Payment test-cred")],
+            Rail::Both => vec![
+                ("payment-signature", "test-proof"),
+                ("authorization", "Payment test-cred"),
+            ],
+        }
     }
 
-    /// Like [`get`], but carries an x402 payment header so the request passes the
-    /// dispatch gate via the x402 rail and reaches the proxy handler.
-    async fn get_with_x402(config: Config, uri: &str) -> axum::response::Response {
+    /// Drive `app()` for a `GET` against `uri`, carrying the payment headers for `rail` so
+    /// the request reaches the dispatch gate in the chosen state.
+    async fn get_with(config: Config, uri: &str, rail: Rail) -> axum::response::Response {
+        let mut request = Request::builder().uri(uri);
+        for (name, value) in headers_for(rail) {
+            request = request.header(name, value);
+        }
         app(config)
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .header("payment-signature", "test-proof")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(request.body(Body::empty()).unwrap())
             .await
             .unwrap()
     }
@@ -155,9 +160,10 @@ mod tests {
 
     #[tokio::test]
     async fn health_returns_200() {
-        let response = get(
+        let response = get_with(
             test_config("http://upstream.invalid".to_string()),
             "/health",
+            Rail::None,
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -177,8 +183,12 @@ mod tests {
             .mount(&upstream)
             .await;
 
-        let response =
-            get_with_x402(test_config(upstream.uri()), "/res/v1/web/search?q=rust").await;
+        let response = get_with(
+            test_config(upstream.uri()),
+            "/res/v1/web/search?q=rust",
+            Rail::X402,
+        )
+        .await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
@@ -195,8 +205,12 @@ mod tests {
             .mount(&upstream)
             .await;
 
-        let response =
-            get_with_x402(test_config(upstream.uri()), "/res/v1/web/search?q=rust").await;
+        let response = get_with(
+            test_config(upstream.uri()),
+            "/res/v1/web/search?q=rust",
+            Rail::X402,
+        )
+        .await;
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
@@ -208,12 +222,62 @@ mod tests {
         // Nothing listens on port 1, so reqwest returns a transport error,
         // which the handler maps to 502 via `AppError::Upstream` — distinct from
         // an upstream that responds with a 5xx (relayed as-is, test above).
-        let response = get_with_x402(
+        let response = get_with(
             test_config("http://127.0.0.1:1".to_string()),
             "/res/v1/web/search?q=rust",
+            Rail::X402,
         )
         .await;
 
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn dispatch_routes_by_payment_headers() {
+        struct Case {
+            name: &'static str,
+            rail: Rail,
+            expected: StatusCode,
+        }
+        // The upstream is unreachable, so cold/collision requests short-circuit in the
+        // dispatch layer before it, while the has-payment requests pass the gate and the
+        // handler 502s trying to reach it. A 502 therefore confirms dispatch let them
+        // through to `search`.
+        let cases = [
+            Case {
+                name: "cold",
+                rail: Rail::None,
+                expected: StatusCode::PAYMENT_REQUIRED,
+            },
+            Case {
+                name: "collision",
+                rail: Rail::Both,
+                expected: StatusCode::BAD_REQUEST,
+            },
+            Case {
+                name: "x402 through",
+                rail: Rail::X402,
+                expected: StatusCode::BAD_GATEWAY,
+            },
+            Case {
+                name: "mpp through",
+                rail: Rail::Mpp,
+                expected: StatusCode::BAD_GATEWAY,
+            },
+        ];
+        for Case {
+            name,
+            rail,
+            expected,
+        } in cases
+        {
+            let response = get_with(
+                test_config("http://127.0.0.1:1".to_string()),
+                "/res/v1/web/search?q=rust",
+                rail,
+            )
+            .await;
+            assert_eq!(response.status(), expected, "case: {name}");
+        }
     }
 }

@@ -27,7 +27,7 @@ const X402_V2_PAYMENT_HEADER: &str = "payment-signature";
 /// The payment rail a request is attempting, determined solely by which payment
 /// headers it carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Rail {
+pub(crate) enum Rail {
     /// No payment proof: a cold request, answered with the dual-rail `402`.
     None,
     /// An x402 attempt (`PAYMENT-SIGNATURE` present).
