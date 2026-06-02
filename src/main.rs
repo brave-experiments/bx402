@@ -4,6 +4,10 @@ use std::error::Error;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Load a local `.env` for development (no-op if absent); real environment
+    // variables still take precedence.
+    dotenvy::dotenv().ok();
+
     println!("{}", bx402::banner());
 
     let config = bx402::Config::from_env().unwrap_or_else(|err| {
