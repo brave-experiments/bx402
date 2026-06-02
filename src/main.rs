@@ -16,6 +16,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
     println!("listening on http://{}", listener.local_addr()?);
 
-    axum::serve(listener, bx402::app()).await?;
+    axum::serve(listener, bx402::app(config)).await?;
     Ok(())
 }

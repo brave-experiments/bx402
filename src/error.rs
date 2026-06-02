@@ -15,6 +15,11 @@ use thiserror::Error;
 /// can return `Result<T, AppError>` and let `?` carry errors to the response.
 #[derive(Debug, Error)]
 pub enum AppError {
+    /// The upstream Brave Search API call failed (connect, timeout, or transport
+    /// error). All of these become a `502 Bad Gateway` to our client.
+    #[error("upstream Brave Search API call failed")]
+    Upstream(#[from] reqwest::Error),
+
     /// The request was malformed — e.g. a missing or invalid query parameter.
     #[error("invalid request: {0}")]
     BadRequest(String),
@@ -27,6 +32,7 @@ pub enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
+            AppError::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream error"),
             AppError::BadRequest(detail) => (StatusCode::BAD_REQUEST, detail.as_str()),
             AppError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "server misconfigured"),
         };
