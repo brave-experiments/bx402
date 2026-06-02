@@ -106,7 +106,25 @@ async fn search(
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
     use tower::ServiceExt;
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_config(base_url: String) -> Config {
+        Config {
+            brave_search_api_key: "secret-key".to_string(),
+            brave_search_api_base_url: base_url,
+        }
+    }
+
+    /// Drive `app()` for a `GET` against `uri` and return the response.
+    async fn get(config: Config, uri: &str) -> axum::response::Response {
+        app(config)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
 
     #[test]
     fn banner_includes_name_and_version() {
@@ -117,20 +135,63 @@ mod tests {
 
     #[tokio::test]
     async fn health_returns_200() {
-        let config = Config {
-            brave_search_api_key: "test-key".to_string(),
-            brave_search_api_base_url: "http://upstream.invalid".to_string(),
-        };
-        let response = app(config)
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = get(
+            test_config("http://upstream.invalid".to_string()),
+            "/health",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn forwards_query_and_key_then_relays_body() {
+        let upstream = MockServer::start().await;
+        let upstream_body = serde_json::json!({ "web": { "results": [] } });
+
+        Mock::given(method("GET"))
+            .and(path("/res/v1/web/search"))
+            .and(query_param("q", "rust"))
+            .and(header("X-Subscription-Token", "secret-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&upstream_body))
+            .expect(1) // also asserts the query + header matched
+            .mount(&upstream)
+            .await;
+
+        let response = get(test_config(upstream.uri()), "/res/v1/web/search?q=rust").await;
 
         assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body, upstream_body);
+    }
+
+    #[tokio::test]
+    async fn upstream_5xx_is_relayed_byte_for_byte() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/res/v1/web/search"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("brave is down"))
+            .mount(&upstream)
+            .await;
+
+        let response = get(test_config(upstream.uri()), "/res/v1/web/search?q=rust").await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(String::from_utf8(bytes.to_vec()).unwrap(), "brave is down");
+    }
+
+    #[tokio::test]
+    async fn unreachable_upstream_becomes_502() {
+        // Nothing listens on port 1, so reqwest returns a transport error,
+        // which the handler maps to 502 via `AppError::Upstream` — distinct from
+        // an upstream that responds with a 5xx (relayed as-is, test above).
+        let response = get(
+            test_config("http://127.0.0.1:1".to_string()),
+            "/res/v1/web/search?q=rust",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 }
