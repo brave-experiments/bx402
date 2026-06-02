@@ -18,6 +18,7 @@ use axum::{
 };
 
 mod config;
+mod dispatch;
 mod error;
 pub use config::Config;
 pub use error::AppError;
