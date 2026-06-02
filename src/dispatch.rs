@@ -11,7 +11,12 @@
 // TODO: remove once the request path uses these.
 #![allow(dead_code)]
 
-use axum::http::{HeaderMap, header};
+use axum::{
+    Json,
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
+};
+use serde_json::json;
 
 /// x402 V2 carries its payment proof in the `PAYMENT-SIGNATURE` request header.
 /// V1's `X-PAYMENT` is deliberately not recognized: the service is V2-only, so a
@@ -44,9 +49,43 @@ fn classify(headers: &HeaderMap) -> Rail {
     }
 }
 
+/// MPP's `WWW-Authenticate` challenge, using the `Payment` scheme (the client replies
+/// with `Authorization: Payment <credential>`). Real params come from `mpp-rs`.
+const MPP_CHALLENGE: &str = r#"Payment realm="bx402""#;
+
+/// Build the cold dual-rail `402`: x402 V2 requirements in the JSON body, MPP's
+/// challenge in the `WWW-Authenticate` header. The client retries on the rail it can pay.
+///
+/// Values are placeholders, sourced from config and the rail SDKs later.
+fn cold_402() -> Response {
+    let x402_requirements = json!({
+        "x402Version": 2,
+        "accepts": [
+            {
+                "scheme": "exact",
+                "network": "eip155:8453",
+                "asset": "USDC",
+                "maxAmountRequired": "0",
+                "payTo": "0x0000000000000000000000000000000000000000",
+                "resource": crate::WEB_SEARCH_PATH,
+                "description": "Brave Search web query",
+                "mimeType": "application/json",
+                "maxTimeoutSeconds": 60
+            }
+        ]
+    });
+    (
+        StatusCode::PAYMENT_REQUIRED,
+        [(header::WWW_AUTHENTICATE, MPP_CHALLENGE)],
+        Json(x402_requirements),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
 
     /// Build a `HeaderMap` from `(name, value)` pairs.
     fn header_map(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -116,5 +155,21 @@ mod tests {
         {
             assert_eq!(classify(&header_map(&headers)), expected, "case: {name}");
         }
+    }
+
+    #[tokio::test]
+    async fn cold_402_advertises_both_rails() {
+        let response = cold_402();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        // MPP rail: a `WWW-Authenticate` challenge using the `Payment` scheme.
+        let challenge = response.headers().get(header::WWW_AUTHENTICATE).unwrap();
+        assert!(challenge.to_str().unwrap().starts_with("Payment"));
+
+        // x402 rail: V2 payment requirements as a JSON body.
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let requirements: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(requirements["x402Version"], 2);
+        assert!(requirements["accepts"].is_array());
     }
 }
