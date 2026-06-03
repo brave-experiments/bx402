@@ -11,18 +11,12 @@
 use axum::{
     Json,
     extract::Request,
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use serde_json::json;
 
-use crate::AppError;
-
-/// x402 V2 carries its payment proof in the `PAYMENT-SIGNATURE` request header.
-/// V1's `X-PAYMENT` is deliberately not recognized: the service is V2-only, so a
-/// V1 client carries no payment we accept and falls through to the cold `402`.
-const X402_V2_PAYMENT_HEADER: &str = "payment-signature";
+use crate::{AppError, mpp, x402};
 
 /// The payment rail a request is attempting, determined solely by which payment
 /// headers it carries.
@@ -38,11 +32,10 @@ pub(crate) enum Rail {
     Both,
 }
 
-/// Classify a request by which payment headers it carries.
+/// Classify a request by which payment headers it carries. The router names no
+/// headers itself; it asks each rail module whether its proof is present.
 fn classify(headers: &HeaderMap) -> Rail {
-    let x402 = headers.contains_key(X402_V2_PAYMENT_HEADER);
-    let mpp = headers.contains_key(header::AUTHORIZATION);
-    match (x402, mpp) {
+    match (x402::has_payment(headers), mpp::has_credential(headers)) {
         (false, false) => Rail::None,
         (true, false) => Rail::X402,
         (false, true) => Rail::Mpp,
@@ -50,35 +43,14 @@ fn classify(headers: &HeaderMap) -> Rail {
     }
 }
 
-/// MPP's `WWW-Authenticate` challenge, using the `Payment` scheme (the client replies
-/// with `Authorization: Payment <credential>`). Real params come from `mpp-rs`.
-const MPP_CHALLENGE: &str = r#"Payment realm="bx402""#;
-
-/// Build the cold dual-rail `402`: x402 V2 requirements in the JSON body, MPP's
-/// challenge in the `WWW-Authenticate` header. The client retries on the rail it can pay.
-///
-/// Values are placeholders, sourced from config and the rail SDKs later.
+/// Build the cold dual-rail `402` by composing each rail's challenge: x402's V2
+/// requirements in the JSON body, MPP's challenge in the `WWW-Authenticate` header.
+/// The client retries on the rail it can pay.
 fn cold_402() -> Response {
-    let x402_requirements = json!({
-        "x402Version": 2,
-        "accepts": [
-            {
-                "scheme": "exact",
-                "network": "eip155:8453",
-                "asset": "USDC",
-                "maxAmountRequired": "0",
-                "payTo": "0x0000000000000000000000000000000000000000",
-                "resource": crate::WEB_SEARCH_PATH,
-                "description": "Brave Search web query",
-                "mimeType": "application/json",
-                "maxTimeoutSeconds": 60
-            }
-        ]
-    });
     (
         StatusCode::PAYMENT_REQUIRED,
-        [(header::WWW_AUTHENTICATE, MPP_CHALLENGE)],
-        Json(x402_requirements),
+        [mpp::challenge()],
+        Json(x402::challenge()),
     )
         .into_response()
 }
@@ -102,6 +74,7 @@ pub(crate) async fn dispatch(req: Request, next: Next) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::header;
     use http_body_util::BodyExt;
 
     /// Build a `HeaderMap` from `(name, value)` pairs.
