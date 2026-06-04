@@ -11,7 +11,7 @@
 use axum::{
     Json,
     extract::Request,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -45,12 +45,13 @@ fn classify(headers: &HeaderMap) -> Rail {
 
 /// Build the cold dual-rail `402` by composing each rail's challenge: x402's V2
 /// requirements in the JSON body, MPP's challenge in the `WWW-Authenticate` header.
+/// `resource` is the requested endpoint, which x402 echoes back to the client.
 /// The client retries on the rail it can pay.
-fn cold_402() -> Response {
+fn cold_402(resource: &str) -> Response {
     (
         StatusCode::PAYMENT_REQUIRED,
         [mpp::challenge()],
-        Json(x402::challenge()),
+        Json(x402::challenge(resource)),
     )
         .into_response()
 }
@@ -65,16 +66,51 @@ fn collision_400() -> Response {
 /// payment attempt through to the handler. Verifying the payment is the rails' job.
 pub(crate) async fn dispatch(req: Request, next: Next) -> Response {
     match classify(req.headers()) {
-        Rail::None => cold_402(),
+        Rail::None => cold_402(&absolute_uri(&req)),
         Rail::Both => collision_400(),
         Rail::X402 | Rail::Mpp => next.run(req).await,
     }
 }
 
+/// Reconstruct the absolute URL the client requested (`scheme://host/path`, no
+/// query string) for the cold `402`'s `resource`. The query is dropped so the
+/// resource names the endpoint, not one specific query; a request with no host
+/// gets the bare path.
+fn absolute_uri(req: &Request) -> String {
+    let path = req.uri().path();
+    let Some(host) = host(req) else {
+        return path.to_string();
+    };
+    format!("{}://{host}{path}", scheme(req))
+}
+
+/// The host the client addressed: the `Host` header when non-empty, else the
+/// URI's authority.
+fn host(req: &Request) -> Option<&str> {
+    header_str(req, header::HOST)
+        .filter(|host| !host.is_empty())
+        .or_else(|| req.uri().authority().map(|a| a.as_str()))
+}
+
+/// The scheme the client used: `X-Forwarded-Proto` when a TLS-terminating proxy
+/// sets it, else the URI's scheme, else `http`.
+fn scheme(req: &Request) -> &str {
+    header_str(req, "x-forwarded-proto")
+        .or_else(|| req.uri().scheme_str())
+        .unwrap_or("http")
+}
+
+/// Read a request header as a string, when present and valid UTF-8.
+fn header_str(req: &Request, name: impl header::AsHeaderName) -> Option<&str> {
+    req.headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::header;
+    use axum::body::Body;
     use http_body_util::BodyExt;
 
     /// Build a `HeaderMap` from `(name, value)` pairs.
@@ -149,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn cold_402_advertises_both_rails() {
-        let response = cold_402();
+        let response = cold_402("https://bx402.example.com/res/v1/web/search");
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
         // MPP rail: a `WWW-Authenticate` challenge using the `Payment` scheme.
@@ -161,5 +197,44 @@ mod tests {
         let requirements: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(requirements["x402Version"], 2);
         assert!(requirements["accepts"].is_array());
+    }
+
+    /// Build a request carrying `headers`, for exercising `absolute_uri`.
+    fn request_with(uri: &str, headers: &[(&str, &str)]) -> Request {
+        let mut builder = Request::builder().uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn absolute_uri_uses_forwarded_proto_and_host_and_drops_query() {
+        let req = request_with(
+            "/res/v1/web/search?q=rust",
+            &[
+                ("host", "bx402.example.com"),
+                ("x-forwarded-proto", "https"),
+            ],
+        );
+        assert_eq!(
+            absolute_uri(&req),
+            "https://bx402.example.com/res/v1/web/search"
+        );
+    }
+
+    #[test]
+    fn absolute_uri_without_a_host_falls_back_to_the_path() {
+        let req = request_with("/res/v1/web/search?q=rust", &[]);
+        assert_eq!(absolute_uri(&req), "/res/v1/web/search");
+    }
+
+    #[test]
+    fn absolute_uri_defaults_scheme_to_http() {
+        let req = request_with("/res/v1/web/search", &[("host", "localhost:8080")]);
+        assert_eq!(
+            absolute_uri(&req),
+            "http://localhost:8080/res/v1/web/search"
+        );
     }
 }

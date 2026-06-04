@@ -3,36 +3,105 @@
 //! See `mpp.rs` for the MPP rail and `dispatch.rs` for the neutral router that
 //! classifies each request and delegates to whichever rail it is paying on.
 
-use axum::http::HeaderMap;
-use serde_json::{Value, json};
+use axum::http::{HeaderMap, Uri};
+use serde_json::Value;
+use x402_chain_eip155::{KnownNetworkEip155, V2Eip155Exact, chain::ChecksummedAddress};
+use x402_types::{networks::USDC, proto::v2};
 
 /// x402 V2 carries its payment proof in the `PAYMENT-SIGNATURE` request header.
 /// V1's `X-PAYMENT` is deliberately not recognized: the service is V2-only, so a
 /// V1 client carries no payment we accept and falls through to the cold `402`.
 const V2_PAYMENT_HEADER: &str = "payment-signature";
 
+/// The treasury address that receives x402 payments (`payTo`). The zero address
+/// is a placeholder; set a real treasury before settling on a live network.
+const PAY_TO: &str = "0x0000000000000000000000000000000000000000";
+
+/// Flat price per request, in USDC base units (6 decimals, so `5_000` = 0.005 USDC).
+/// One rate for every request today; pricing may later vary by endpoint or by rail.
+const PRICE_USDC_BASE_UNITS: u64 = 5_000;
+
 /// Returns `true` if the request carries an x402 V2 payment proof.
 pub(crate) fn has_payment(headers: &HeaderMap) -> bool {
     headers.contains_key(V2_PAYMENT_HEADER)
 }
 
-/// The x402 contribution to the cold dual-rail `402`: the V2 payment requirements
-/// the client's wallet signs against, returned as the JSON response body.
-pub(crate) fn challenge() -> Value {
-    json!({
-        "x402Version": 2,
-        "accepts": [
-            {
+/// Build the x402 V2 payment requirements we advertise and verify against. The same
+/// value seeds both the cold `402` body and payment verification at a later stage,
+/// so there is one source of truth for what we charge.
+fn requirements() -> v2::PaymentRequirements {
+    let pay_to: ChecksummedAddress = PAY_TO.parse().expect("PAY_TO is a valid address");
+    let usdc = USDC::base_sepolia();
+    V2Eip155Exact::price_tag(pay_to, usdc.amount(PRICE_USDC_BASE_UNITS)).requirements
+}
+
+/// Label for each paid endpoint, keyed by request path.
+fn endpoint_description(path: &str) -> &'static str {
+    match path {
+        crate::WEB_SEARCH_PATH => "Brave Search API - Web / Search",
+        _ => "Brave Search API",
+    }
+}
+
+/// x402's part of the cold `402`: the V2 `PaymentRequired` envelope for `resource`.
+pub(crate) fn challenge(resource: &str) -> Value {
+    let uri = resource.parse::<Uri>().ok();
+    let path = uri.as_ref().map(|u| u.path()).unwrap_or(resource);
+    let body = v2::PaymentRequired {
+        x402_version: v2::X402Version2,
+        error: Some("Payment required".to_string()),
+        resource: Some(v2::ResourceInfo {
+            url: resource.to_string(),
+            description: Some(endpoint_description(path).to_string()),
+            mime_type: Some("application/json".to_string()),
+        }),
+        accepts: vec![requirements()],
+    };
+    serde_json::to_value(body).expect("PaymentRequired envelope serializes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn requirements_match_the_pricing_constants() {
+        let reqs = requirements();
+
+        assert_eq!(reqs.scheme, "exact");
+        assert_eq!(reqs.network.to_string(), "eip155:84532"); // Base Sepolia
+        assert_eq!(reqs.amount, PRICE_USDC_BASE_UNITS.to_string()); // decimal base units
+        assert_eq!(reqs.pay_to, PAY_TO);
+    }
+
+    #[test]
+    fn challenge_emits_the_full_payment_required_payload() {
+        let body = challenge("https://bx402.example.com/res/v1/web/search");
+
+        let expected = json!({
+            "x402Version": 2,
+            "error": "Payment required",
+            "resource": {
+                "url": "https://bx402.example.com/res/v1/web/search",
+                "description": "Brave Search API - Web / Search",
+                "mimeType": "application/json"
+            },
+            "accepts": [{
                 "scheme": "exact",
-                "network": "eip155:8453",
-                "asset": "USDC",
-                "maxAmountRequired": "0",
+                "network": "eip155:84532",
+                "amount": "5000",
+                "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
                 "payTo": "0x0000000000000000000000000000000000000000",
-                "resource": crate::WEB_SEARCH_PATH,
-                "description": "Brave Search web query",
-                "mimeType": "application/json",
-                "maxTimeoutSeconds": 60
-            }
-        ]
-    })
+                "maxTimeoutSeconds": 300,
+                "extra": {
+                    "assetTransferMethod": "eip3009",
+                    "name": "USDC",
+                    "version": "2"
+                }
+            }]
+        });
+
+        assert_eq!(body, expected);
+    }
 }

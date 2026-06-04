@@ -282,4 +282,29 @@ mod tests {
             assert_eq!(response.status(), expected, "case: {name}");
         }
     }
+
+    #[tokio::test]
+    async fn cold_402_advertises_the_absolute_request_url_as_resource() {
+        // End-to-end: a cold request through the real router must echo the endpoint
+        // it hit back as `resource.url`, built from the proxy headers (scheme from
+        // `X-Forwarded-Proto`, host from `Host`) with the query stripped.
+        let request = Request::builder()
+            .uri("/res/v1/web/search?q=rust")
+            .header("host", "api.bx402.io")
+            .header("x-forwarded-proto", "https")
+            .body(Body::empty())
+            .unwrap();
+        let response = app(test_config("http://upstream.invalid".to_string()))
+            .oneshot(request)
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["resource"]["url"],
+            "https://api.bx402.io/res/v1/web/search"
+        );
+    }
 }
