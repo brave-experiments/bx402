@@ -24,9 +24,15 @@ pub enum AppError {
     #[error("invalid request: {0}")]
     BadRequest(String),
 
-    /// The server is misconfigured — a required setting was absent at startup.
+    /// A required setting was absent at startup.
     #[error("missing required configuration: {0}")]
-    Config(&'static str),
+    MissingConfig(&'static str),
+
+    /// A configured value could not initialize a startup dependency, such as an
+    /// unparseable URL. Like [`AppError::MissingConfig`], this aborts startup and
+    /// never emits a response.
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(String),
 }
 
 impl IntoResponse for AppError {
@@ -34,7 +40,9 @@ impl IntoResponse for AppError {
         let (status, message) = match &self {
             AppError::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream error"),
             AppError::BadRequest(detail) => (StatusCode::BAD_REQUEST, detail.as_str()),
-            AppError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "server misconfigured"),
+            AppError::MissingConfig(_) | AppError::InvalidConfig(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "server misconfigured")
+            }
         };
         // The full error (with its source chain) belongs in our logs; the
         // client only ever sees `message`.
@@ -53,8 +61,14 @@ mod tests {
     }
 
     #[test]
-    fn config_maps_to_500() {
-        let response = AppError::Config("BRAVE_SEARCH_API_KEY").into_response();
+    fn missing_config_maps_to_500() {
+        let response = AppError::MissingConfig("BRAVE_SEARCH_API_KEY").into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn invalid_config_maps_to_500() {
+        let response = AppError::InvalidConfig("X402_FACILITATOR_URL: bad".into()).into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
