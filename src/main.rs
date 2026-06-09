@@ -16,10 +16,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         std::process::exit(1);
     });
     println!("brave search api: {}", config.brave_search_api_base_url);
+    println!("x402 facilitator: {}", config.x402_facilitator_url);
+
+    let app = bx402::app(config).unwrap_or_else(|err| {
+        eprintln!("{err}");
+        std::process::exit(1);
+    });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
     println!("listening on http://{}", listener.local_addr()?);
 
-    axum::serve(listener, bx402::app(config)).await?;
+    axum::serve(listener, app).await?;
     Ok(())
 }

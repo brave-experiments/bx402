@@ -3,20 +3,20 @@
 //! The payment handshake is dual-rail, so every request falls into one of four
 //! states, decided purely by which payment headers are present:
 //!
-//! - **cold** (no payment proof): answered with the dual-rail `402`
-//! - **x402**: an x402 payment attempt
-//! - **MPP**: an MPP payment attempt
-//! - **collision** (both rails at once): rejected with `400`
+//! * **cold** (no payment proof): answered with the dual-rail `402`
+//! * **x402** (`PAYMENT-SIGNATURE`): run through the x402 verify/settle flow
+//! * **MPP** (`Authorization`): passed through to the handler
+//! * **collision** (both rails at once): rejected with `400`
 
 use axum::{
     Json,
-    extract::Request,
+    extract::{Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 
-use crate::{AppError, mpp, x402};
+use crate::{AppError, Config, mpp, x402};
 
 /// The payment rail a request is attempting, determined solely by which payment
 /// headers it carries.
@@ -61,14 +61,46 @@ fn collision_400() -> Response {
     AppError::BadRequest("send exactly one payment rail, not both".into()).into_response()
 }
 
-/// Dispatch middleware for the paid route: classify by payment headers, then either
-/// short-circuit a cold request with `402` or a rail collision with `400`, or pass a
-/// payment attempt through to the handler. Verifying the payment is the rails' job.
-pub(crate) async fn dispatch(req: Request, next: Next) -> Response {
+/// The dispatch middleware's state: one field per payment rail, built once at startup
+/// and cloned into each request.
+///
+/// Wrapping the client in this struct also does quiet double duty for type inference.
+/// `dispatch` is generic over the client type `X`, which the compiler reads off the
+/// state value's type. `x402::client()` returns an anonymous `impl Client` with no
+/// name we can write down, so a bare client would leave `X` impossible to infer;
+/// `Context<Client>` lets the compiler read `X` straight off the type parameter:
+///
+/// ```text
+/// ┌──────────────────────────────────────────────────┐
+/// │  Context<Client>  ──▶  X = Client     compiles    │
+/// │  Client           ──▶  X = ?          E0283       │
+/// └──────────────────────────────────────────────────┘
+/// ```
+#[derive(Clone)]
+pub(crate) struct Context<X> {
+    pub(crate) x402: X,
+}
+
+/// Assemble the dispatch context from config, building each rail's client.
+pub(crate) fn context(config: &Config) -> Result<Context<impl x402::Client>, AppError> {
+    Ok(Context {
+        x402: x402::client(config)?,
+    })
+}
+
+/// Dispatch middleware for the paid route: classify the request by its payment
+/// headers and route each state to its rail. The router decides which rail runs,
+/// never how a rail verifies.
+pub(crate) async fn dispatch<X: x402::Client>(
+    State(ctx): State<Context<X>>,
+    req: Request,
+    next: Next,
+) -> Response {
     match classify(req.headers()) {
         Rail::None => cold_402(&absolute_uri(&req)),
         Rail::Both => collision_400(),
-        Rail::X402 | Rail::Mpp => next.run(req).await,
+        Rail::X402 => x402::handle(ctx.x402, req, next).await,
+        Rail::Mpp => next.run(req).await,
     }
 }
 

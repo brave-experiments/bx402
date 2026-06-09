@@ -1,12 +1,26 @@
-//! The x402 payment rail — everything specific to x402 lives here.
+//! The x402 payment rail: everything specific to x402 lives here.
 //!
 //! See `mpp.rs` for the MPP rail and `dispatch.rs` for the neutral router that
 //! classifies each request and delegates to whichever rail it is paying on.
 
-use axum::http::{HeaderMap, Uri};
-use serde_json::Value;
+use axum::{
+    Json,
+    extract::Request,
+    http::{HeaderMap, StatusCode, Uri},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
+use serde_json::{Value, json};
+use x402_axum::facilitator_client::FacilitatorClient;
+
+use crate::{AppError, Config};
 use x402_chain_eip155::{KnownNetworkEip155, V2Eip155Exact, chain::ChecksummedAddress};
-use x402_types::{networks::USDC, proto::v2};
+use x402_types::{
+    facilitator::Facilitator,
+    networks::USDC,
+    proto::{self, v2},
+    util::Base64Bytes,
+};
 
 /// x402 V2 carries its payment proof in the `PAYMENT-SIGNATURE` request header.
 /// V1's `X-PAYMENT` is deliberately not recognized: the service is V2-only, so a
@@ -58,6 +72,87 @@ pub(crate) fn challenge(resource: &str) -> Value {
         accepts: vec![requirements()],
     };
     serde_json::to_value(body).expect("PaymentRequired envelope serializes")
+}
+
+/// The x402 facilitator client as a single crate-local bound: the SDK's
+/// [`Facilitator`] interface plus the `Clone + Send + Sync + 'static` the axum layer
+/// needs. A blanket impl means any real facilitator (and the wiremock-backed client
+/// in tests) satisfies it, and the rest of the crate names this instead of the SDK
+/// trait.
+pub(crate) trait Client: Facilitator + Clone + Send + Sync + 'static {}
+impl<F> Client for F where F: Facilitator + Clone + Send + Sync + 'static {}
+
+/// Build the real x402 facilitator client from config, returned as an opaque
+/// [`Client`] so the rest of the crate depends on this module, not the SDK. A bad
+/// `X402_FACILITATOR_URL` is a startup misconfiguration, surfaced as [`AppError`].
+pub(crate) fn client(config: &Config) -> Result<impl Client, AppError> {
+    FacilitatorClient::try_from(config.x402_facilitator_url.as_str())
+        .map_err(|err| AppError::InvalidConfig(format!("X402_FACILITATOR_URL: {err}")))
+}
+
+/// Drive the x402 pay flow for a request that carries a payment proof: verify the
+/// payment, then run the search. A payment that does not verify is rejected before any
+/// upstream call:
+///
+/// * payment missing, malformed, or rejected: `402`, before any upstream call.
+/// * facilitator unreachable on verify: `502`.
+pub(crate) async fn handle<F: Client>(client: F, req: Request, next: Next) -> Response {
+    let request = match verify_request(req.headers()) {
+        Some(request) => request,
+        None => return payment_rejected("malformed x402 payment payload"),
+    };
+
+    // Verify before doing any work. A facilitator we cannot reach is our failure,
+    // not the client's, so it is a 502 rather than a 402.
+    match client.verify(&request).await {
+        Ok(response) if is_valid(&response) => {}
+        Ok(_) => return payment_rejected("x402 payment did not verify"),
+        Err(_) => return gateway_error("payment facilitator unavailable"),
+    }
+
+    next.run(req).await
+}
+
+/// Decode the client's base64 JSON payment payload from `PAYMENT-SIGNATURE` and wrap
+/// it with our advertised [`requirements`] into the facilitator's verify request.
+/// Returns `None` if the header is absent or not the base64 JSON required.
+fn verify_request(headers: &HeaderMap) -> Option<proto::VerifyRequest> {
+    let header = headers.get(V2_PAYMENT_HEADER)?.to_str().ok()?;
+    let decoded = Base64Bytes::from(header.as_bytes()).decode().ok()?;
+    let payload: Value = serde_json::from_slice(&decoded).ok()?;
+    let body = json!({
+        "x402Version": 2,
+        "paymentPayload": payload,
+        "paymentRequirements": requirements(),
+    });
+    let raw = serde_json::value::RawValue::from_string(body.to_string()).ok()?;
+    Some(proto::VerifyRequest::from(raw))
+}
+
+/// A verify response confirms the payment when `isValid` is true. The SDK returns the
+/// `POST /verify` body as an untyped `serde_json::Value` (not a struct), so we read the
+/// field by key. Shape:
+///
+/// ```json
+/// { "isValid": true,  "payer": "0x09e0…2c1f" }
+/// { "isValid": false, "invalidReason": "insufficient_funds", "payer": "0x09e0…2c1f" }
+/// ```
+fn is_valid(response: &proto::VerifyResponse) -> bool {
+    response.0.get("isValid").and_then(Value::as_bool) == Some(true)
+}
+
+/// A `402` telling the client their x402 payment was missing, malformed, or rejected.
+fn payment_rejected(detail: &str) -> Response {
+    (
+        StatusCode::PAYMENT_REQUIRED,
+        Json(json!({ "error": detail })),
+    )
+        .into_response()
+}
+
+/// A `502` for a payment we could not verify through the facilitator.
+fn gateway_error(detail: &str) -> Response {
+    (StatusCode::BAD_GATEWAY, Json(json!({ "error": detail }))).into_response()
 }
 
 #[cfg(test)]

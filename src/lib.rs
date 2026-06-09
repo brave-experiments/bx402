@@ -48,22 +48,24 @@ pub fn banner() -> String {
 
 /// Build the HTTP application.
 ///
-/// Returns a `Router` rather than serving it, so tests can drive the same
-/// router as the binary via `tower::ServiceExt::oneshot` without binding a
-/// socket. Takes [`Config`] by value so tests can point the proxy at a mock
-/// upstream instead of the live Brave Search API.
-pub fn app(config: Config) -> Router {
+/// Returns a `Router` rather than serving it, so tests can drive the same router as
+/// the binary via `tower::ServiceExt::oneshot` without binding a socket. Takes
+/// [`Config`] by value so tests can point the proxy at mock upstreams instead of the
+/// live Brave Search API and facilitator.
+pub fn app(config: Config) -> Result<Router, AppError> {
+    let context = dispatch::context(&config)?;
     let state = AppState {
         client: reqwest::Client::new(),
         config: Arc::new(config),
     };
-    Router::new()
+    let router = Router::new()
         .route("/health", get(health))
         .route(
             WEB_SEARCH_PATH,
-            get(search).layer(middleware::from_fn(dispatch::dispatch)),
+            get(search).layer(middleware::from_fn_with_state(context, dispatch::dispatch)),
         )
-        .with_state(state)
+        .with_state(state);
+    Ok(router)
 }
 
 /// Liveness probe — returns `200 OK` with an empty body if the server is up.
@@ -119,36 +121,68 @@ mod tests {
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn test_config(base_url: String) -> Config {
+    /// A `PAYMENT-SIGNATURE` value that base64-decodes to the JSON object `{}` — enough
+    /// for the pay flow to parse a payload before the request reaches the facilitator.
+    const PAYMENT_SIGNATURE: &str = "e30="; // base64("{}")
+
+    fn config_with(base_url: String, facilitator_url: String) -> Config {
         Config {
             brave_search_api_key: "secret-key".to_string(),
             brave_search_api_base_url: base_url,
-            x402_facilitator_url: "http://facilitator.invalid".to_string(),
+            x402_facilitator_url: facilitator_url,
         }
     }
 
-    /// The request headers a [`Rail`] state sends. Values are arbitrary; dispatch keys
-    /// only on header presence.
+    /// A config whose facilitator URL is parseable but unreachable — fine for the
+    /// non-payment paths (cold, MPP, health) that never call the facilitator.
+    fn test_config(base_url: String) -> Config {
+        config_with(base_url, "http://facilitator.invalid".to_string())
+    }
+
+    /// Start a wiremock server standing in for the x402 facilitator: `POST /verify`
+    /// reports `valid`.
+    async fn mock_facilitator(valid: bool) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/verify"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "isValid": valid })),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// The request headers a [`Rail`] state sends. The MPP credential is arbitrary
+    /// (dispatch keys on presence), but the x402 `payment-signature` must be the
+    /// base64 JSON the pay flow decodes before it reaches the facilitator.
     fn headers_for(rail: Rail) -> Vec<(&'static str, &'static str)> {
         match rail {
             Rail::None => vec![],
-            Rail::X402 => vec![("payment-signature", "test-proof")],
+            Rail::X402 => vec![("payment-signature", PAYMENT_SIGNATURE)],
             Rail::Mpp => vec![("authorization", "Payment test-cred")],
             Rail::Both => vec![
-                ("payment-signature", "test-proof"),
+                ("payment-signature", PAYMENT_SIGNATURE),
                 ("authorization", "Payment test-cred"),
             ],
         }
     }
 
-    /// Drive `app()` for a `GET` against `uri`, carrying the payment headers for `rail` so
-    /// the request reaches the dispatch gate in the chosen state.
+    /// Drive `app()` for a `GET` against `uri`, carrying the payment headers for `rail`
+    /// so the request reaches the dispatch gate in the chosen state. A valid facilitator
+    /// backs the x402 rail, so an x402 attempt verifies and settles.
     async fn get_with(config: Config, uri: &str, rail: Rail) -> axum::response::Response {
+        let facilitator = mock_facilitator(true).await;
+        let config = Config {
+            x402_facilitator_url: facilitator.uri(),
+            ..config
+        };
         let mut request = Request::builder().uri(uri);
         for (name, value) in headers_for(rail) {
             request = request.header(name, value);
         }
         app(config)
+            .unwrap()
             .oneshot(request.body(Body::empty()).unwrap())
             .await
             .unwrap()
@@ -159,6 +193,15 @@ mod tests {
         let banner = banner();
         assert!(banner.starts_with("bx402 v"));
         assert!(banner.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn app_rejects_an_unparseable_facilitator_url() {
+        let config = config_with(
+            "http://upstream.invalid".to_string(),
+            "not a url".to_string(),
+        );
+        assert!(matches!(app(config), Err(AppError::InvalidConfig(_))));
     }
 
     #[tokio::test]
@@ -296,6 +339,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let response = app(test_config("http://upstream.invalid".to_string()))
+            .unwrap()
             .oneshot(request)
             .await
             .unwrap();
@@ -307,5 +351,36 @@ mod tests {
             body["resource"]["url"],
             "https://api.bx402.io/res/v1/web/search"
         );
+    }
+
+    /// Build a `GET /res/v1/web/search?q=rust` carrying a decodable x402 payment proof.
+    fn paid_request() -> Request<Body> {
+        Request::builder()
+            .uri("/res/v1/web/search?q=rust")
+            .header("payment-signature", PAYMENT_SIGNATURE)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rejected_payment_returns_402_and_never_calls_upstream() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/res/v1/web/search"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0) // a rejected payment must not reach the search; verified on drop
+            .mount(&upstream)
+            .await;
+
+        let facilitator = mock_facilitator(false).await;
+        let response = app(config_with(upstream.uri(), facilitator.uri()))
+            .unwrap()
+            .oneshot(paid_request())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        // Nothing settled, so no receipt.
+        assert!(response.headers().get("payment-response").is_none());
     }
 }
