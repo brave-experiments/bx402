@@ -140,13 +140,22 @@ mod tests {
     }
 
     /// Start a wiremock server standing in for the x402 facilitator: `POST /verify`
-    /// reports `valid`.
+    /// reports `valid`, `POST /settle` always succeeds with a canned receipt.
     async fn mock_facilitator(valid: bool) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/verify"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({ "isValid": valid })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/settle"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "success": true, "transaction": "0xtxhash" }),
+                ),
             )
             .mount(&server)
             .await;
@@ -360,6 +369,43 @@ mod tests {
             .header("payment-signature", PAYMENT_SIGNATURE)
             .body(Body::empty())
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn verified_payment_runs_the_search_and_returns_a_settlement_receipt() {
+        let upstream = MockServer::start().await;
+        let upstream_body = serde_json::json!({ "web": { "results": [] } });
+        Mock::given(method("GET"))
+            .and(path("/res/v1/web/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&upstream_body))
+            .expect(1) // the search runs exactly once, after verification
+            .mount(&upstream)
+            .await;
+
+        let facilitator = mock_facilitator(true).await;
+        let response = app(config_with(upstream.uri(), facilitator.uri()))
+            .unwrap()
+            .oneshot(paid_request())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The settlement receipt rides back base64-encoded in `Payment-Response`.
+        let receipt_header = response
+            .headers()
+            .get("payment-response")
+            .expect("settled response carries a Payment-Response receipt")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let receipt = x402::decode_receipt(&receipt_header);
+        assert_eq!(receipt["success"], true);
+
+        // The upstream body is relayed unchanged underneath the receipt header.
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body, upstream_body);
     }
 
     #[tokio::test]

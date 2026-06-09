@@ -6,7 +6,7 @@
 use axum::{
     Json,
     extract::Request,
-    http::{HeaderMap, StatusCode, Uri},
+    http::{HeaderMap, HeaderValue, StatusCode, Uri, header::HeaderName},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -26,6 +26,10 @@ use x402_types::{
 /// V1's `X-PAYMENT` is deliberately not recognized: the service is V2-only, so a
 /// V1 client carries no payment we accept and falls through to the cold `402`.
 const V2_PAYMENT_HEADER: &str = "payment-signature";
+
+/// x402 V2 returns the settlement receipt in the `Payment-Response` response header
+/// as base64-encoded JSON, the dual of the `PAYMENT-SIGNATURE` request header.
+const PAYMENT_RECEIPT_HEADER: &str = "payment-response";
 
 /// The treasury address that receives x402 payments (`payTo`). The zero address
 /// is a placeholder; set a real treasury before settling on a live network.
@@ -90,12 +94,14 @@ pub(crate) fn client(config: &Config) -> Result<impl Client, AppError> {
         .map_err(|err| AppError::InvalidConfig(format!("X402_FACILITATOR_URL: {err}")))
 }
 
-/// Drive the x402 pay flow for a request that carries a payment proof: verify the
-/// payment, then run the search. A payment that does not verify is rejected before any
-/// upstream call:
+/// Drive the x402 pay flow for a request that carries a payment proof: verify, run
+/// the search, then settle, each step gating the next. It fails closed, so a caller
+/// is never charged for a response they don't get nor served one they didn't pay for:
 ///
 /// * payment missing, malformed, or rejected: `402`, before any upstream call.
 /// * facilitator unreachable on verify: `502`.
+/// * search fails (4xx or 5xx): relayed as is, settlement skipped.
+/// * settlement fails: `502`, the response body withheld.
 pub(crate) async fn handle<F: Client>(client: F, req: Request, next: Next) -> Response {
     let request = match verify_request(req.headers()) {
         Some(request) => request,
@@ -110,12 +116,22 @@ pub(crate) async fn handle<F: Client>(client: F, req: Request, next: Next) -> Re
         Err(_) => return gateway_error("payment facilitator unavailable"),
     }
 
-    next.run(req).await
+    let response = next.run(req).await;
+    if !response.status().is_success() {
+        return response;
+    }
+
+    // `SettleRequest` is an alias of `VerifyRequest`, so the value we verified
+    // settles unchanged. Withhold the (already produced) body unless it settles.
+    match client.settle(&request).await {
+        Ok(receipt) if settled(&receipt) => attach_receipt(response, &receipt),
+        _ => gateway_error("x402 payment could not be settled"),
+    }
 }
 
 /// Decode the client's base64 JSON payment payload from `PAYMENT-SIGNATURE` and wrap
-/// it with our advertised [`requirements`] into the facilitator's verify request.
-/// Returns `None` if the header is absent or not the base64 JSON required.
+/// it with our advertised [`requirements`] into the facilitator's verify/settle
+/// request. Returns `None` if the header is absent or not the base64 JSON required.
 fn verify_request(headers: &HeaderMap) -> Option<proto::VerifyRequest> {
     let header = headers.get(V2_PAYMENT_HEADER)?.to_str().ok()?;
     let decoded = Base64Bytes::from(header.as_bytes()).decode().ok()?;
@@ -125,7 +141,7 @@ fn verify_request(headers: &HeaderMap) -> Option<proto::VerifyRequest> {
         "paymentPayload": payload,
         "paymentRequirements": requirements(),
     });
-    let raw = serde_json::value::RawValue::from_string(body.to_string()).ok()?;
+    let raw = serde_json::value::to_raw_value(&body).ok()?;
     Some(proto::VerifyRequest::from(raw))
 }
 
@@ -141,6 +157,30 @@ fn is_valid(response: &proto::VerifyResponse) -> bool {
     response.0.get("isValid").and_then(Value::as_bool) == Some(true)
 }
 
+/// A settle response confirms settlement when `success` is true. Like the verify
+/// response, the SDK returns the `POST /settle` body as an untyped `serde_json::Value`,
+/// so we read the field by key. Shape:
+///
+/// ```json
+/// { "success": true,  "payer": "0x09e0…2c1f", "transaction": "0x4f2b…9ad3", "network": "eip155:84532" }
+/// { "success": false, "error_reason": "insufficient_funds", "network": "eip155:84532" }
+/// ```
+fn settled(response: &proto::SettleResponse) -> bool {
+    response.0.get("success").and_then(Value::as_bool) == Some(true)
+}
+
+/// Attach the settlement receipt as the base64 `Payment-Response` header the client
+/// reads back, leaving the response body untouched.
+fn attach_receipt(mut response: Response, receipt: &proto::SettleResponse) -> Response {
+    let encoded = Base64Bytes::encode(receipt.0.to_string());
+    if let Ok(value) = HeaderValue::from_str(&encoded.to_string()) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(PAYMENT_RECEIPT_HEADER), value);
+    }
+    response
+}
+
 /// A `402` telling the client their x402 payment was missing, malformed, or rejected.
 fn payment_rejected(detail: &str) -> Response {
     (
@@ -150,9 +190,19 @@ fn payment_rejected(detail: &str) -> Response {
         .into_response()
 }
 
-/// A `502` for a payment we could not verify through the facilitator.
+/// A `502` for a payment we could neither verify nor settle through the facilitator.
 fn gateway_error(detail: &str) -> Response {
     (StatusCode::BAD_GATEWAY, Json(json!({ "error": detail }))).into_response()
+}
+
+/// Decode a base64 `Payment-Response` receipt back to JSON, the test-side inverse of
+/// [`attach_receipt`], so the crate's tests read receipts through this module too.
+#[cfg(test)]
+pub(crate) fn decode_receipt(encoded: &str) -> Value {
+    let bytes = Base64Bytes::from(encoded.as_bytes())
+        .decode()
+        .expect("receipt is valid base64");
+    serde_json::from_slice(&bytes).expect("receipt is JSON")
 }
 
 #[cfg(test)]
