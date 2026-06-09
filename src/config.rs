@@ -14,6 +14,9 @@ pub struct Config {
     /// Base URL of the Brave Search API. Overridable so tests can point at a
     /// mock server; defaults to the public endpoint.
     pub brave_search_api_base_url: String,
+    /// Base URL of the x402 facilitator that verifies and settles payments.
+    /// Docs: https://docs.x402.org/core-concepts/facilitator
+    pub x402_facilitator_url: String,
 }
 
 impl Config {
@@ -21,6 +24,7 @@ impl Config {
     /// variable:
     ///
     /// * `BRAVE_SEARCH_API_KEY` (required): forwarded upstream as `X-Subscription-Token`.
+    /// * `X402_FACILITATOR_URL` (required): base URL of the x402 facilitator.
     /// * `BRAVE_SEARCH_API_BASE_URL` (optional): defaults to [`DEFAULT_BRAVE_SEARCH_API_BASE_URL`].
     ///
     /// An absent required variable yields [`AppError::MissingConfig`]; a present but
@@ -29,9 +33,11 @@ impl Config {
         let brave_search_api_key = require_var("BRAVE_SEARCH_API_KEY")?;
         let brave_search_api_base_url = env::var("BRAVE_SEARCH_API_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_BRAVE_SEARCH_API_BASE_URL.to_string());
+        let x402_facilitator_url = require_var("X402_FACILITATOR_URL")?;
         Ok(Self {
             brave_search_api_key,
             brave_search_api_base_url,
+            x402_facilitator_url,
         })
     }
 }

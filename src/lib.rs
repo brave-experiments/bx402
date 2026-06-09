@@ -123,6 +123,7 @@ mod tests {
         Config {
             brave_search_api_key: "secret-key".to_string(),
             brave_search_api_base_url: base_url,
+            x402_facilitator_url: "http://facilitator.invalid".to_string(),
         }
     }
 
