@@ -16,7 +16,6 @@ use x402_axum::facilitator_client::FacilitatorClient;
 use crate::{AppError, Config};
 use x402_chain_eip155::{KnownNetworkEip155, V2Eip155Exact, chain::ChecksummedAddress};
 use x402_types::{
-    facilitator::Facilitator,
     networks::USDC,
     proto::{self, v2},
     util::Base64Bytes,
@@ -78,19 +77,21 @@ pub(crate) fn challenge(resource: &str) -> Value {
     serde_json::to_value(body).expect("PaymentRequired envelope serializes")
 }
 
-/// The x402 facilitator client as a single crate-local bound: the SDK's
-/// [`Facilitator`] interface plus the `Clone + Send + Sync + 'static` the axum layer
-/// needs. A blanket impl means any real facilitator (and the wiremock-backed client
-/// in tests) satisfies it, and the rest of the crate names this instead of the SDK
-/// trait.
-pub(crate) trait Client: Facilitator + Clone + Send + Sync + 'static {}
-impl<F> Client for F where F: Facilitator + Clone + Send + Sync + 'static {}
+/// The x402 facilitator client, newtyped so the rest of the crate names this module's
+/// type, not the SDK's, and `dispatch` can carry it as plain axum state.
+///
+/// Returning `impl Facilitator + …` would hide the SDK just as well, but axum state
+/// must be a type we can name. The way to name an opaque type is a TAIT alias
+/// (`type Client = impl Facilitator + …`), and TAIT is not stable on our pinned
+/// toolchain, so a concrete newtype it is.
+#[derive(Clone)]
+pub(crate) struct Client(FacilitatorClient);
 
-/// Build the real x402 facilitator client from config, returned as an opaque
-/// [`Client`] so the rest of the crate depends on this module, not the SDK. A bad
-/// `X402_FACILITATOR_URL` is a startup misconfiguration, surfaced as [`AppError`].
-pub(crate) fn client(config: &Config) -> Result<impl Client, AppError> {
+/// Build the x402 facilitator client from config. A bad `X402_FACILITATOR_URL` is a
+/// startup misconfiguration, surfaced as [`AppError`].
+pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
     FacilitatorClient::try_from(config.x402_facilitator_url.as_str())
+        .map(Client)
         .map_err(|err| AppError::InvalidConfig(format!("X402_FACILITATOR_URL: {err}")))
 }
 
@@ -102,7 +103,11 @@ pub(crate) fn client(config: &Config) -> Result<impl Client, AppError> {
 /// * facilitator unreachable on verify: `502`.
 /// * search fails (4xx or 5xx): relayed as is, settlement skipped.
 /// * settlement fails: `502`, the response body withheld.
-pub(crate) async fn handle<F: Client>(client: F, req: Request, next: Next) -> Response {
+pub(crate) async fn handle(
+    Client(facilitator_client): Client,
+    req: Request,
+    next: Next,
+) -> Response {
     let request = match verify_request(req.headers()) {
         Some(request) => request,
         None => return payment_rejected("malformed x402 payment payload"),
@@ -110,7 +115,7 @@ pub(crate) async fn handle<F: Client>(client: F, req: Request, next: Next) -> Re
 
     // Verify before doing any work. A facilitator we cannot reach is our failure,
     // not the client's, so it is a 502 rather than a 402.
-    match client.verify(&request).await {
+    match facilitator_client.verify(&request).await {
         Ok(response) if is_valid(&response) => {}
         Ok(_) => return payment_rejected("x402 payment did not verify"),
         Err(_) => return gateway_error("payment facilitator unavailable"),
@@ -123,7 +128,7 @@ pub(crate) async fn handle<F: Client>(client: F, req: Request, next: Next) -> Re
 
     // `SettleRequest` is an alias of `VerifyRequest`, so the value we verified
     // settles unchanged. Withhold the (already produced) body unless it settles.
-    match client.settle(&request).await {
+    match facilitator_client.settle(&request).await {
         Ok(receipt) if settled(&receipt) => attach_receipt(response, &receipt),
         _ => gateway_error("x402 payment could not be settled"),
     }

@@ -61,28 +61,15 @@ fn collision_400() -> Response {
     AppError::BadRequest("send exactly one payment rail, not both".into()).into_response()
 }
 
-/// The dispatch middleware's state: one field per payment rail, built once at startup
-/// and cloned into each request.
-///
-/// Wrapping the client in this struct also does quiet double duty for type inference.
-/// `dispatch` is generic over the client type `X`, which the compiler reads off the
-/// state value's type. `x402::client()` returns an anonymous `impl Client` with no
-/// name we can write down, so a bare client would leave `X` impossible to infer;
-/// `Context<Client>` lets the compiler read `X` straight off the type parameter:
-///
-/// ```text
-/// ┌──────────────────────────────────────────────────┐
-/// │  Context<Client>  ──▶  X = Client     compiles    │
-/// │  Client           ──▶  X = ?          E0283       │
-/// └──────────────────────────────────────────────────┘
-/// ```
+/// The dispatch middleware's state: one field per payment rail, built once at
+/// startup and cloned into each request.
 #[derive(Clone)]
-pub(crate) struct Context<X> {
-    pub(crate) x402: X,
+pub(crate) struct Context {
+    pub(crate) x402: x402::Client,
 }
 
 /// Assemble the dispatch context from config, building each rail's client.
-pub(crate) fn context(config: &Config) -> Result<Context<impl x402::Client>, AppError> {
+pub(crate) fn context(config: &Config) -> Result<Context, AppError> {
     Ok(Context {
         x402: x402::client(config)?,
     })
@@ -91,11 +78,7 @@ pub(crate) fn context(config: &Config) -> Result<Context<impl x402::Client>, App
 /// Dispatch middleware for the paid route: classify the request by its payment
 /// headers and route each state to its rail. The router decides which rail runs,
 /// never how a rail verifies.
-pub(crate) async fn dispatch<X: x402::Client>(
-    State(ctx): State<Context<X>>,
-    req: Request,
-    next: Next,
-) -> Response {
+pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Next) -> Response {
     match classify(req.headers()) {
         Rail::None => cold_402(&absolute_uri(&req)),
         Rail::Both => collision_400(),
