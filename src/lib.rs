@@ -294,10 +294,10 @@ mod tests {
             rail: Rail,
             expected: StatusCode,
         }
-        // The upstream is unreachable, so cold/collision requests short-circuit in the
-        // dispatch layer before it, while the has-payment requests pass the gate and the
-        // handler 502s trying to reach it. A 502 therefore confirms dispatch let them
-        // through to `search`.
+        // The upstream is unreachable, so cold/MPP/collision requests short-circuit in
+        // the dispatch layer before it, while a verified x402 request passes the gate
+        // and the handler 502s trying to reach it. A 502 therefore confirms dispatch
+        // let it through to `search`.
         let cases = [
             Case {
                 name: "cold",
@@ -315,9 +315,9 @@ mod tests {
                 expected: StatusCode::BAD_GATEWAY,
             },
             Case {
-                name: "mpp through",
+                name: "mpp answered with the cold 402",
                 rail: Rail::Mpp,
-                expected: StatusCode::BAD_GATEWAY,
+                expected: StatusCode::PAYMENT_REQUIRED,
             },
         ];
         for Case {
