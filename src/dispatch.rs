@@ -3,9 +3,10 @@
 //! The payment handshake is dual-rail, so every request falls into one of four
 //! states, decided purely by which payment headers are present:
 //!
-//! * **cold** (no payment proof): answered with the dual-rail `402`
+//! * **cold** (no payment proof): answered with the `402` challenge
 //! * **x402** (`PAYMENT-SIGNATURE`): run through the x402 verify/settle flow
-//! * **MPP** (`Authorization`): passed through to the handler
+//! * **MPP** (`Authorization`): answered with the cold `402` until MPP
+//!   verification ships
 //! * **collision** (both rails at once): rejected with `400`
 
 use axum::{
@@ -22,11 +23,12 @@ use crate::{AppError, Config, mpp, x402};
 /// headers it carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rail {
-    /// No payment proof: a cold request, answered with the dual-rail `402`.
+    /// No payment proof: a cold request, answered with the `402` challenge.
     None,
     /// An x402 attempt (`PAYMENT-SIGNATURE` present).
     X402,
-    /// An MPP attempt (`Authorization` present).
+    /// An MPP attempt (`Authorization` present), answered with the cold `402`
+    /// until MPP verification ships.
     Mpp,
     /// Both rails at once: a collision, rejected with `400`.
     Both,
@@ -43,14 +45,15 @@ fn classify(headers: &HeaderMap) -> Rail {
     }
 }
 
-/// Build the cold dual-rail `402` by composing each rail's challenge: x402's V2
-/// requirements in the JSON body, MPP's challenge in the `WWW-Authenticate` header.
-/// `resource` is the requested endpoint, which x402 echoes back to the client.
-/// The client retries on the rail it can pay.
+/// Build the cold `402` from the rails' challenges:
+///
+/// * x402: the V2 payment requirements as the JSON body, echoing `resource`
+///   (the requested endpoint) back to the client.
+/// * MPP: nothing — its `WWW-Authenticate` challenge returns here once the
+///   rail can verify what it advertises.
 fn cold_402(resource: &str) -> Response {
     (
         StatusCode::PAYMENT_REQUIRED,
-        [mpp::challenge()],
         Json(x402::challenge(resource)),
     )
         .into_response()
@@ -83,7 +86,9 @@ pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Nex
         Rail::None => cold_402(&absolute_uri(&req)),
         Rail::Both => collision_400(),
         Rail::X402 => x402::handle(ctx.x402, req, next).await,
-        Rail::Mpp => next.run(req).await,
+        // An MPP credential cannot be verified yet, so it pays for nothing:
+        // answer with the cold 402 rather than serve an unpaid search.
+        Rail::Mpp => cold_402(&absolute_uri(&req)),
     }
 }
 
@@ -199,13 +204,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cold_402_advertises_both_rails() {
+    async fn cold_402_advertises_only_the_x402_rail() {
         let response = cold_402("https://bx402.example.com/res/v1/web/search");
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
-        // MPP rail: a `WWW-Authenticate` challenge using the `Payment` scheme.
-        let challenge = response.headers().get(header::WWW_AUTHENTICATE).unwrap();
-        assert!(challenge.to_str().unwrap().starts_with("Payment"));
+        // MPP rail: no `WWW-Authenticate` challenge while the rail is paused.
+        assert!(response.headers().get(header::WWW_AUTHENTICATE).is_none());
 
         // x402 rail: V2 payment requirements as a JSON body.
         let body = response.into_body().collect().await.unwrap().to_bytes();

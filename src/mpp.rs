@@ -14,8 +14,13 @@ pub(crate) fn has_credential(headers: &HeaderMap) -> bool {
     headers.contains_key(header::AUTHORIZATION)
 }
 
-/// The MPP contribution to the cold dual-rail `402`: the `WWW-Authenticate` response
-/// header (name and challenge value) the client answers on the MPP rail.
+/// The MPP contribution to the cold `402`: the `WWW-Authenticate` response header
+/// (name and challenge value) the client answers on the MPP rail. Out of the cold
+/// `402` while the rail cannot verify what this advertises.
+#[expect(
+    dead_code,
+    reason = "the MPP rail is paused; dispatch re-adds this challenge to the cold 402 when MPP verification ships"
+)]
 pub(crate) fn challenge() -> (HeaderName, HeaderValue) {
     (
         header::WWW_AUTHENTICATE,
