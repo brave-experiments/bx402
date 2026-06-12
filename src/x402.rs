@@ -30,9 +30,8 @@ const V2_PAYMENT_HEADER: &str = "payment-signature";
 /// as base64-encoded JSON, the dual of the `PAYMENT-SIGNATURE` request header.
 const PAYMENT_RECEIPT_HEADER: &str = "payment-response";
 
-/// The treasury address that receives x402 payments (`payTo`). The zero address
-/// is a placeholder; set a real treasury before settling on a live network.
-const PAY_TO: &str = "0x0000000000000000000000000000000000000000";
+/// The EVM treasury address that receives x402 payments (`payTo`).
+const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
 
 /// Flat price per request, in USDC base units (6 decimals, so `5_000` = 0.005 USDC).
 /// One rate for every request today; pricing may later vary by endpoint or by rail.
@@ -47,7 +46,7 @@ pub(crate) fn has_payment(headers: &HeaderMap) -> bool {
 /// value seeds both the cold `402` body and payment verification at a later stage,
 /// so there is one source of truth for what we charge.
 fn requirements() -> v2::PaymentRequirements {
-    let pay_to: ChecksummedAddress = PAY_TO.parse().expect("PAY_TO is a valid address");
+    let pay_to: ChecksummedAddress = PAY_TO_EVM.parse().expect("PAY_TO_EVM is a valid address");
     let usdc = USDC::base_sepolia();
     V2Eip155Exact::price_tag(pay_to, usdc.amount(PRICE_USDC_BASE_UNITS)).requirements
 }
@@ -222,7 +221,7 @@ mod tests {
         assert_eq!(reqs.scheme, "exact");
         assert_eq!(reqs.network.to_string(), "eip155:84532"); // Base Sepolia
         assert_eq!(reqs.amount, PRICE_USDC_BASE_UNITS.to_string()); // decimal base units
-        assert_eq!(reqs.pay_to, PAY_TO);
+        assert_eq!(reqs.pay_to, PAY_TO_EVM);
     }
 
     #[test]
@@ -242,7 +241,7 @@ mod tests {
                 "network": "eip155:84532",
                 "amount": "5000",
                 "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-                "payTo": "0x0000000000000000000000000000000000000000",
+                "payTo": "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d",
                 "maxTimeoutSeconds": 300,
                 "extra": {
                     "assetTransferMethod": "eip3009",
