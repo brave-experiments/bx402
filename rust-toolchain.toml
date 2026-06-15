@@ -1,6 +1,6 @@
 # Pin the exact compiler so local builds and CI are byte-for-byte reproducible.
 # Bump deliberately (and review the changelog) rather than tracking a moving channel.
 [toolchain]
-channel = "1.95.0"
+channel = "1.96.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
