@@ -3922,9 +3922,9 @@ dependencies = [
 
 [[package]]
 name = "x402-chain-eip155"
-version = "1.5.5"
+version = "1.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "669b066e1da74f07000058e779753ab39574500e47745ec6e9147e416c79900a"
+checksum = "a2951a81a676414ed7215da8df9dcb85dd424420ed7ed104141ca5ce2f16775b"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
