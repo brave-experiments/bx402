@@ -24,6 +24,6 @@ x402-chain-eip155 = { version = "1.5.5", features = ["server"] }
 x402-axum = "1.5.5"
 
 [dev-dependencies]
-http-body-util = "0.1"
-tower = { version = "0.5", features = ["util"] }
-wiremock = "0.6"
+http-body-util = "=0.1.3"
+tower = { version = "=0.5.3", features = ["util"] }
+wiremock = "=0.6.5"
