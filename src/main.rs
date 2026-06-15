@@ -23,8 +23,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         std::process::exit(1);
     });
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
-    println!("listening on http://{}", listener.local_addr()?);
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+    println!("listening on {}", listener.local_addr()?);
 
     axum::serve(listener, app).await?;
     Ok(())
