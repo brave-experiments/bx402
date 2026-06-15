@@ -15,7 +15,7 @@ pub struct Config {
     /// mock server; defaults to the public endpoint.
     pub brave_search_api_base_url: String,
     /// Base URL of the x402 facilitator that verifies and settles payments.
-    /// Docs: https://docs.x402.org/core-concepts/facilitator
+    /// Docs: <https://docs.x402.org/core-concepts/facilitator>
     pub x402_facilitator_url: String,
 }
 
@@ -25,7 +25,7 @@ impl Config {
     ///
     /// * `BRAVE_SEARCH_API_KEY` (required): forwarded upstream as `X-Subscription-Token`.
     /// * `X402_FACILITATOR_URL` (required): base URL of the x402 facilitator.
-    /// * `BRAVE_SEARCH_API_BASE_URL` (optional): defaults to [`DEFAULT_BRAVE_SEARCH_API_BASE_URL`].
+    /// * `BRAVE_SEARCH_API_BASE_URL` (optional): defaults to the public Brave Search API endpoint.
     ///
     /// An absent required variable yields [`AppError::MissingConfig`]; a present but
     /// non-Unicode one yields [`AppError::InvalidConfig`].
