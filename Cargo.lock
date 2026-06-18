@@ -606,7 +606,7 @@ dependencies = [
  "wiremock",
  "x402-axum",
  "x402-chain-eip155",
- "x402-types",
+ "x402-types 1.5.6",
 ]
 
 [[package]]
@@ -1095,7 +1095,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2573,7 +2573,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2630,7 +2630,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2984,7 +2984,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3112,7 +3112,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3571,7 +3571,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3855,9 +3855,9 @@ dependencies = [
 
 [[package]]
 name = "x402-axum"
-version = "1.5.6"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aabd64efe532a2dda828bfcd1ffb22327ed7904a317986bafd9ec5012cab7f55"
+checksum = "0eec7ff12b448a5611e983bc47d8455975db3214cfb7be6272b228ec4c82f705"
 dependencies = [
  "axum-core",
  "http",
@@ -3868,7 +3868,7 @@ dependencies = [
  "tokio",
  "tower",
  "url",
- "x402-types",
+ "x402-types 2.0.0",
 ]
 
 [[package]]
@@ -3882,7 +3882,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
- "x402-types",
+ "x402-types 1.5.6",
 ]
 
 [[package]]
@@ -3895,6 +3895,22 @@ dependencies = [
  "async-trait",
  "base64",
  "regex",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror",
+]
+
+[[package]]
+name = "x402-types"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "138d25ea5c2d762380fca6eaea13b3bc1a31fa48bcf1cbb022ede4b153a91ef3"
+dependencies = [
+ "alloy-primitives",
+ "async-trait",
+ "base64",
  "rust_decimal",
  "serde",
  "serde_json",
