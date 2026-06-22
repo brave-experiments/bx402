@@ -94,14 +94,35 @@ pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
         .map_err(|err| AppError::InvalidConfig(format!("X402_FACILITATOR_URL: {err}")))
 }
 
-/// Drive the x402 pay flow for a request that carries a payment proof: verify, run
-/// the search, then settle, each step gating the next. It fails closed, so a caller
-/// is never charged for a response they don't get nor served one they didn't pay for:
+/// Drive the x402 pay flow for a request that carries a payment proof: verify first,
+/// then settle and run the search concurrently. Verify gates out bogus payments before
+/// any upstream call, so the client then waits for `max(settle, search)` rather than
+/// their sum. The receipt comes from settle, so the response always blocks on it.
 ///
-/// * payment missing, malformed, or rejected: `402`, before any upstream call.
-/// * facilitator unreachable on verify: `502`.
-/// * search fails (4xx or 5xx): relayed as is, settlement skipped.
-/// * settlement fails: `502`, the response body withheld.
+/// Overlapping the two has a cost: settle is broadcast before the search returns, and an
+/// on-chain settle cannot be undone, so a search that then fails (or an unreachable
+/// upstream) may still be charged — the price of the latency win. When we did charge, the
+/// receipt rides back with whatever the search produced, so the client always has proof of
+/// a payment they made.
+///
+/// ```text
+///   1. verify the payment, first and by itself
+///        fails ──▶ 402 / 502, stop   (settle and search never run)
+///
+///   2. settle and search run together
+///        settle ─┐
+///                ├──▶ wait for both
+///        search ─┘
+///
+///   3. reply, chosen by (did it settle?, search status):
+///
+///   ┌─────────────┬───────────────────────┬─────────────────────────────┐
+///   │             │  search 2xx           │  search 4xx / 5xx           │
+///   ├─────────────┼───────────────────────┼─────────────────────────────┤
+///   │ settled     │  200 + receipt        │  relayed error + receipt    │
+///   │ not settled │  502, body withheld   │  relayed error (no charge)  │
+///   └─────────────┴───────────────────────┴─────────────────────────────┘
+/// ```
 pub(crate) async fn handle(
     Client(facilitator_client): Client,
     req: Request,
@@ -120,16 +141,19 @@ pub(crate) async fn handle(
         Err(_) => return gateway_error("payment facilitator unavailable"),
     }
 
-    let response = next.run(req).await;
-    if !response.status().is_success() {
-        return response;
-    }
+    // Verify passed, so settle and search can run together. `request` is owned, so settle
+    // borrows it while the search takes `req` by value; the same verified request settles
+    // unchanged (`SettleRequest` is an alias of `VerifyRequest`).
+    let (settle_result, response) =
+        tokio::join!(facilitator_client.settle(&request), next.run(req));
 
-    // `SettleRequest` is an alias of `VerifyRequest`, so the value we verified
-    // settles unchanged. Withhold the (already produced) body unless it settles.
-    match facilitator_client.settle(&request).await {
+    match settle_result {
+        // settled → return the receipt alongside whatever the search produced
         Ok(receipt) if settled(&receipt) => attach_receipt(response, &receipt),
-        _ => gateway_error("x402 payment could not be settled"),
+        // not settled, search ok → withhold the body we can't charge for
+        _ if response.status().is_success() => gateway_error("x402 payment could not be settled"),
+        // not settled, search failed → relay the error; nothing was charged
+        _ => response,
     }
 }
 
