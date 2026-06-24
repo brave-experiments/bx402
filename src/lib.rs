@@ -140,8 +140,9 @@ mod tests {
     }
 
     /// Start a wiremock server standing in for the x402 facilitator: `POST /verify`
-    /// reports `valid`, `POST /settle` always succeeds with a canned receipt.
-    async fn mock_facilitator(valid: bool) -> MockServer {
+    /// reports `valid`, `POST /settle` reports `settles` (with a canned receipt on
+    /// success). The two are independent so a test can drive any verify/settle pairing.
+    async fn mock_facilitator(valid: bool, settles: bool) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/verify"))
@@ -150,13 +151,14 @@ mod tests {
             )
             .mount(&server)
             .await;
+        let settle_body = if settles {
+            serde_json::json!({ "success": true, "transaction": "0xtxhash" })
+        } else {
+            serde_json::json!({ "success": false, "error_reason": "settlement_failed" })
+        };
         Mock::given(method("POST"))
             .and(path("/settle"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(
-                    serde_json::json!({ "success": true, "transaction": "0xtxhash" }),
-                ),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(settle_body))
             .mount(&server)
             .await;
         server
@@ -181,7 +183,7 @@ mod tests {
     /// so the request reaches the dispatch gate in the chosen state. A valid facilitator
     /// backs the x402 rail, so an x402 attempt verifies and settles.
     async fn get_with(config: Config, uri: &str, rail: Rail) -> axum::response::Response {
-        let facilitator = mock_facilitator(true).await;
+        let facilitator = mock_facilitator(true, true).await;
         let config = Config {
             x402_facilitator_url: facilitator.uri(),
             ..config
@@ -268,6 +270,12 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // Settlement is gated on a successful search, so a relayed upstream error is
+        // never charged: no settle call, no receipt. Only successful searches are billed.
+        assert!(
+            response.headers().get("payment-response").is_none(),
+            "a failed search must not be settled, so it carries no receipt",
+        );
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(String::from_utf8(bytes.to_vec()).unwrap(), "brave is down");
     }
@@ -382,7 +390,7 @@ mod tests {
             .mount(&upstream)
             .await;
 
-        let facilitator = mock_facilitator(true).await;
+        let facilitator = mock_facilitator(true, true).await;
         let response = app(config_with(upstream.uri(), facilitator.uri()))
             .unwrap()
             .oneshot(paid_request())
@@ -418,7 +426,7 @@ mod tests {
             .mount(&upstream)
             .await;
 
-        let facilitator = mock_facilitator(false).await;
+        let facilitator = mock_facilitator(false, true).await;
         let response = app(config_with(upstream.uri(), facilitator.uri()))
             .unwrap()
             .oneshot(paid_request())
@@ -428,5 +436,32 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
         // Nothing settled, so no receipt.
         assert!(response.headers().get("payment-response").is_none());
+    }
+
+    #[tokio::test]
+    async fn unsettled_payment_withholds_a_successful_body() {
+        // Verify passes and the search succeeds, but settlement fails. The client did
+        // not pay, so the produced body must be withheld behind a 502 rather than served.
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/res/v1/web/search"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "web": {} })),
+            )
+            .mount(&upstream)
+            .await;
+
+        let facilitator = mock_facilitator(true, false).await;
+        let response = app(config_with(upstream.uri(), facilitator.uri()))
+            .unwrap()
+            .oneshot(paid_request())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(response.headers().get("payment-response").is_none());
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "x402 payment could not be settled");
     }
 }
