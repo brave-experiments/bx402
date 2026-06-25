@@ -3855,9 +3855,9 @@ dependencies = [
 
 [[package]]
 name = "x402-axum"
-version = "1.5.6"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aabd64efe532a2dda828bfcd1ffb22327ed7904a317986bafd9ec5012cab7f55"
+checksum = "ea776d956cb45e01a50564f98a54f0d57a64f21923bd6a61f6eb23d4d85e2b52"
 dependencies = [
  "axum-core",
  "http",
@@ -3873,9 +3873,9 @@ dependencies = [
 
 [[package]]
 name = "x402-chain-eip155"
-version = "1.5.6"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2951a81a676414ed7215da8df9dcb85dd424420ed7ed104141ca5ce2f16775b"
+checksum = "29ae3d2a41660dd49fffc887623c69f19399a2340766da92653713f4ff953960"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -3887,14 +3887,13 @@ dependencies = [
 
 [[package]]
 name = "x402-types"
-version = "1.5.6"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19ad28de8b4d3c7e0f885dc8724c24a7e117246d64ba9e3ba4d724a110fd29dd"
+checksum = "9c0207f03ddd25e5eec4f75590deaf1b50bdeee96c7d958343eb7602a7a3a9cf"
 dependencies = [
  "alloy-primitives",
  "async-trait",
  "base64",
- "regex",
  "rust_decimal",
  "serde",
  "serde_json",

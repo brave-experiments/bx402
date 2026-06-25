@@ -72,6 +72,7 @@ pub(crate) fn challenge(resource: &str) -> Value {
             mime_type: Some("application/json".to_string()),
         }),
         accepts: vec![requirements()],
+        extensions: Default::default(),
     };
     serde_json::to_value(body).expect("PaymentRequired envelope serializes")
 }
