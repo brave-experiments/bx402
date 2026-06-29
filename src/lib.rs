@@ -22,6 +22,7 @@ mod config;
 mod dispatch;
 mod error;
 mod mpp;
+mod screener;
 mod x402;
 pub use config::Config;
 pub use error::AppError;
