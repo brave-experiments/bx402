@@ -26,6 +26,7 @@ mod screener;
 mod x402;
 pub use config::Config;
 pub use error::AppError;
+pub use screener::{RestrictedAddressScreener, Status, init as init_screener};
 
 /// Shared application state, cloned into each request handler.
 ///
@@ -131,6 +132,7 @@ mod tests {
             brave_search_api_key: "secret-key".to_string(),
             brave_search_api_base_url: base_url,
             x402_facilitator_url: facilitator_url,
+            restricted_address_s3_bucket: None,
         }
     }
 

@@ -25,6 +25,9 @@ x402-axum = "2.0.0"
 # Default features pull a vulnerable TLS stack (rustls-webpki 0.101.7). We opt out and
 # enable only what we need: default-https-client for HTTPS, rt-tokio for the runtime.
 aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+# Defaults are fine here: aws-config already uses the modern default-https-client, not the
+# legacy rustls connector, so no vulnerable TLS stack.
+aws-config = "1"
 base64 = "0.22"
 
 [dev-dependencies]

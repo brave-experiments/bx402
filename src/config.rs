@@ -17,6 +17,9 @@ pub struct Config {
     /// Base URL of the x402 facilitator that verifies and settles payments.
     /// Docs: <https://docs.x402.org/core-concepts/facilitator>
     pub x402_facilitator_url: String,
+    /// S3 bucket holding the restricted-address list. `None` turns screening off,
+    /// the default for local and testnet runs.
+    pub restricted_address_s3_bucket: Option<String>,
 }
 
 impl Config {
@@ -26,6 +29,7 @@ impl Config {
     /// * `BRAVE_SEARCH_API_KEY` (required): forwarded upstream as `X-Subscription-Token`.
     /// * `X402_FACILITATOR_URL` (required): base URL of the x402 facilitator.
     /// * `BRAVE_SEARCH_API_BASE_URL` (optional): defaults to the public Brave Search API endpoint.
+    /// * `RESTRICTED_ADDRESS_S3_BUCKET` (optional): unset or empty turns screening off.
     ///
     /// An absent required variable yields [`AppError::MissingConfig`]; a present but
     /// non-Unicode one yields [`AppError::InvalidConfig`].
@@ -34,10 +38,14 @@ impl Config {
         let brave_search_api_base_url = env::var("BRAVE_SEARCH_API_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_BRAVE_SEARCH_API_BASE_URL.to_string());
         let x402_facilitator_url = require_var("X402_FACILITATOR_URL")?;
+        let restricted_address_s3_bucket = env::var("RESTRICTED_ADDRESS_S3_BUCKET")
+            .ok()
+            .filter(|bucket| !bucket.is_empty());
         Ok(Self {
             brave_search_api_key,
             brave_search_api_base_url,
             x402_facilitator_url,
+            restricted_address_s3_bucket,
         })
     }
 }

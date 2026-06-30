@@ -25,14 +25,24 @@
 // Unused until the x402 rail wires it in; dropped then.
 #![allow(dead_code)]
 
+use std::error::Error;
+use std::time::Duration;
+
+use aws_config::BehaviorVersion;
+use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::operation::head_object::HeadObjectError as SdkErr;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+use crate::{AppError, Config};
+
+/// Canary key used to probe the bucket at startup.
+const CANARY_KEY: &str = "bx402.canary";
+
 /// Screens identifiers against the restricted-address S3 bucket. `Clone` is cheap: the
 /// inner `aws_sdk_s3::Client` is `Arc`-backed, like `reqwest::Client`.
 #[derive(Clone)]
-pub(crate) struct RestrictedAddressScreener {
+pub struct RestrictedAddressScreener {
     client: aws_sdk_s3::Client,
     bucket: String,
 }
@@ -65,14 +75,19 @@ impl RestrictedAddressScreener {
 
     /// Screen one identifier, exactly as given.
     ///
-    /// The caller must pass the already-canonical form (casing differs per chain; see the
-    /// module docs). The key is `base64url(identifier)`, and one `HeadObject` decides:
-    ///
-    /// - `200`: on the list, returns [`Screening::Blocked`]
-    /// - `404 NotFound`: not on the list, returns [`Screening::Allowed`]
-    /// - anything else: returns [`ScreenError`], so the caller blocks
+    /// The caller must pass the already-canonical form (casing differs per chain; see
+    /// the module docs). The identifier is base64url-encoded into the S3 key.
     pub(crate) async fn screen(&self, identifier: &str) -> Result<Screening, ScreenError> {
-        let key = URL_SAFE_NO_PAD.encode(identifier.as_bytes());
+        self.head_key(URL_SAFE_NO_PAD.encode(identifier.as_bytes()))
+            .await
+    }
+
+    /// Look up one exact S3 key with `HeadObject`:
+    ///
+    /// - `200`: key present, returns [`Screening::Blocked`]
+    /// - `404 NotFound`: key absent, returns [`Screening::Allowed`]
+    /// - anything else: returns [`ScreenError`], so the caller blocks
+    async fn head_key(&self, key: String) -> Result<Screening, ScreenError> {
         match self
             .client
             .head_object()
@@ -93,6 +108,86 @@ impl RestrictedAddressScreener {
     }
 }
 
+/// Outcome of [`init`], for the startup log line.
+pub enum Status {
+    /// Screening is on, against this bucket.
+    Enabled { bucket: String },
+    /// Screening is off because no bucket is configured.
+    Disabled,
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Status::Enabled { bucket } => write!(f, "✓ enabled (bucket={bucket})"),
+            Status::Disabled => write!(f, "✗ disabled (RESTRICTED_ADDRESS_S3_BUCKET not set)"),
+        }
+    }
+}
+
+/// Build the screener from config and prove it works before serving traffic.
+///
+/// - bucket unset: returns `(None, Disabled)`, screening off
+/// - bucket set: builds the AWS client and probes the bucket once. A reachable bucket
+///   returns `(Some, Enabled)`; any probe failure aborts startup with
+///   [`AppError::InvalidConfig`], so a misconfigured screener never serves traffic.
+pub async fn init(
+    config: &Config,
+) -> Result<(Option<RestrictedAddressScreener>, Status), AppError> {
+    let Some(bucket) = config.restricted_address_s3_bucket.clone() else {
+        return Ok((None, Status::Disabled));
+    };
+    // Cap the S3 call so a stalled connection can't hang startup. Kept generous because
+    // the first call also resolves credentials.
+    let aws = aws_config::defaults(BehaviorVersion::latest())
+        .timeout_config(
+            TimeoutConfig::builder()
+                .operation_timeout(Duration::from_secs(10))
+                .build(),
+        )
+        .load()
+        .await;
+    let (screener, status) = init_with(aws_sdk_s3::Client::new(&aws), bucket).await?;
+    Ok((Some(screener), status))
+}
+
+/// The probe, split out so tests can inject a client pointed at a mock bucket. Only
+/// reached when a bucket is configured, so it always yields a screener on success.
+async fn init_with(
+    client: aws_sdk_s3::Client,
+    bucket: String,
+) -> Result<(RestrictedAddressScreener, Status), AppError> {
+    let screener = RestrictedAddressScreener::new(client, bucket.clone());
+    match screener.head_key(CANARY_KEY.to_string()).await {
+        // Reachable (404, or even a 200) means credentials and permissions work.
+        Ok(_) => Ok((screener, Status::Enabled { bucket })),
+        Err(err) => {
+            // Report the underlying cause (no credentials, IAM 403, timeout), not the
+            // generic wrapper message.
+            let cause = err
+                .source()
+                .map(error_chain)
+                .unwrap_or_else(|| err.to_string());
+            Err(AppError::InvalidConfig(format!(
+                "restricted address screening probe failed: {cause}"
+            )))
+        }
+    }
+}
+
+/// Flatten an error and its `source` chain into one line, so the underlying cause (an
+/// IAM 403, a timeout) shows in the startup log.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut message = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,7 +195,7 @@ mod tests {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// Build a screener pointed at a wiremock server standing in for S3.
+    /// Build an S3 client pointed at a wiremock server standing in for S3.
     ///
     /// The SDK signs every request, even against a fake, so the client needs:
     ///
@@ -110,7 +205,7 @@ mod tests {
     ///   could not resolve to the mock)
     ///
     /// Retries are off so the error paths return promptly and deterministically.
-    fn screener_for(endpoint: String) -> RestrictedAddressScreener {
+    fn test_client(endpoint: String) -> aws_sdk_s3::Client {
         let config = aws_sdk_s3::Config::builder()
             .behavior_version(BehaviorVersion::latest())
             .region(Region::new("us-east-1"))
@@ -119,10 +214,11 @@ mod tests {
             .force_path_style(true)
             .retry_config(RetryConfig::disabled())
             .build();
-        RestrictedAddressScreener::new(
-            aws_sdk_s3::Client::from_conf(config),
-            "restricted".to_string(),
-        )
+        aws_sdk_s3::Client::from_conf(config)
+    }
+
+    fn screener_for(endpoint: String) -> RestrictedAddressScreener {
+        RestrictedAddressScreener::new(test_client(endpoint), "restricted".to_string())
     }
 
     /// Screen `"0xanything"` against a mock S3 that answers every `HEAD` with `status`.
@@ -196,5 +292,77 @@ mod tests {
         // not a definite NotFound, so the screener denies.
         let screener = screener_for("http://127.0.0.1:1".to_string());
         assert!(screener.screen("0xanything").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn init_disabled_when_bucket_unset() {
+        let config = crate::Config {
+            brave_search_api_key: "key".to_string(),
+            brave_search_api_base_url: "http://upstream.invalid".to_string(),
+            x402_facilitator_url: "http://facilitator.invalid".to_string(),
+            restricted_address_s3_bucket: None,
+        };
+        let (screener, status) = init(&config).await.unwrap();
+        assert!(screener.is_none());
+        assert!(matches!(status, Status::Disabled));
+    }
+
+    #[tokio::test]
+    async fn init_enabled_when_bucket_reachable() {
+        let server = MockServer::start().await;
+        // The probe HEADs the literal canary key; a 404 there means the bucket is
+        // reachable. The 500 catch-all makes the test pass only if that exact key was hit.
+        Mock::given(method("HEAD"))
+            .and(wiremock::matchers::path(format!(
+                "/restricted/{CANARY_KEY}"
+            )))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let (_screener, status) = init_with(test_client(server.uri()), "restricted".to_string())
+            .await
+            .unwrap();
+        assert!(matches!(status, Status::Enabled { .. }));
+    }
+
+    /// Run `init_with` against a mock S3 that answers every `HEAD` with `status`.
+    async fn init_against(status: u16) -> Result<(RestrictedAddressScreener, Status), AppError> {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        init_with(test_client(server.uri()), "restricted".to_string()).await
+    }
+
+    #[tokio::test]
+    async fn init_enabled_when_canary_present() {
+        let (_screener, status) = init_against(200).await.unwrap();
+        assert!(matches!(status, Status::Enabled { .. }));
+    }
+
+    #[tokio::test]
+    async fn init_fails_fast_on_probe_error() {
+        assert!(matches!(
+            init_against(403).await,
+            Err(AppError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn status_display_reads_clearly() {
+        let enabled = Status::Enabled {
+            bucket: "restricted".to_string(),
+        };
+        assert_eq!(enabled.to_string(), "✓ enabled (bucket=restricted)");
+        assert_eq!(
+            Status::Disabled.to_string(),
+            "✗ disabled (RESTRICTED_ADDRESS_S3_BUCKET not set)"
+        );
     }
 }

@@ -18,6 +18,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("brave search api: {}", config.brave_search_api_base_url);
     println!("x402 facilitator: {}", config.x402_facilitator_url);
 
+    // A configured but unreachable bucket aborts startup, so the service never serves
+    // traffic with a broken screener.
+    let (_screener, screening) = bx402::init_screener(&config).await.unwrap_or_else(|err| {
+        eprintln!("{err}");
+        std::process::exit(1);
+    });
+    println!("restricted address screening: {screening}");
+
     let app = bx402::app(config).unwrap_or_else(|err| {
         eprintln!("{err}");
         std::process::exit(1);
