@@ -22,9 +22,6 @@
 //! One screener backs every chain this way. Adapted from the Go reference
 //! (`brave-intl/compliance-ops`).
 
-// Unused until the x402 rail wires it in; dropped then.
-#![allow(dead_code)]
-
 use std::error::Error;
 use std::time::Duration;
 
@@ -188,37 +185,45 @@ fn error_chain(err: &dyn std::error::Error) -> String {
     message
 }
 
+/// Build an S3 client pointed at a wiremock server standing in for S3, shared by tests
+/// across the crate.
+///
+/// The SDK signs every request, even against a fake, so the client needs:
+///
+/// - static test credentials
+/// - an explicit region
+/// - `force_path_style`, so requests are `HEAD /<bucket>/<key>` (a virtual-host URL
+///   could not resolve to the mock)
+///
+/// Retries are off so the error paths return promptly and deterministically.
+#[cfg(test)]
+fn test_client(endpoint: String) -> aws_sdk_s3::Client {
+    use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region, retry::RetryConfig};
+    let config = aws_sdk_s3::Config::builder()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(Credentials::new("test", "test", None, None, "test"))
+        .endpoint_url(endpoint)
+        .force_path_style(true)
+        .retry_config(RetryConfig::disabled())
+        .build();
+    aws_sdk_s3::Client::from_conf(config)
+}
+
+/// Build a screener pointed at a wiremock S3, for tests in other modules of the crate.
+#[cfg(test)]
+pub(crate) fn test_screener(endpoint: String, bucket: &str) -> RestrictedAddressScreener {
+    RestrictedAddressScreener::new(test_client(endpoint), bucket.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region, retry::RetryConfig};
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// Build an S3 client pointed at a wiremock server standing in for S3.
-    ///
-    /// The SDK signs every request, even against a fake, so the client needs:
-    ///
-    /// - static test credentials
-    /// - an explicit region
-    /// - `force_path_style`, so requests are `HEAD /<bucket>/<key>` (a virtual-host URL
-    ///   could not resolve to the mock)
-    ///
-    /// Retries are off so the error paths return promptly and deterministically.
-    fn test_client(endpoint: String) -> aws_sdk_s3::Client {
-        let config = aws_sdk_s3::Config::builder()
-            .behavior_version(BehaviorVersion::latest())
-            .region(Region::new("us-east-1"))
-            .credentials_provider(Credentials::new("test", "test", None, None, "test"))
-            .endpoint_url(endpoint)
-            .force_path_style(true)
-            .retry_config(RetryConfig::disabled())
-            .build();
-        aws_sdk_s3::Client::from_conf(config)
-    }
-
     fn screener_for(endpoint: String) -> RestrictedAddressScreener {
-        RestrictedAddressScreener::new(test_client(endpoint), "restricted".to_string())
+        test_screener(endpoint, "restricted-address-bucket")
     }
 
     /// Screen `"0xanything"` against a mock S3 that answers every `HEAD` with `status`.
@@ -255,7 +260,7 @@ mod tests {
         // Only the exact stored key exists; every other key 404s.
         Mock::given(method("HEAD"))
             .and(wiremock::matchers::path(format!(
-                "/restricted/{stored_key}"
+                "/restricted-address-bucket/{stored_key}"
             )))
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
@@ -314,7 +319,7 @@ mod tests {
         // reachable. The 500 catch-all makes the test pass only if that exact key was hit.
         Mock::given(method("HEAD"))
             .and(wiremock::matchers::path(format!(
-                "/restricted/{CANARY_KEY}"
+                "/restricted-address-bucket/{CANARY_KEY}"
             )))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
@@ -324,9 +329,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        let (_screener, status) = init_with(test_client(server.uri()), "restricted".to_string())
-            .await
-            .unwrap();
+        let (_screener, status) = init_with(
+            test_client(server.uri()),
+            "restricted-address-bucket".to_string(),
+        )
+        .await
+        .unwrap();
         assert!(matches!(status, Status::Enabled { .. }));
     }
 
@@ -337,7 +345,11 @@ mod tests {
             .respond_with(ResponseTemplate::new(status))
             .mount(&server)
             .await;
-        init_with(test_client(server.uri()), "restricted".to_string()).await
+        init_with(
+            test_client(server.uri()),
+            "restricted-address-bucket".to_string(),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -357,9 +369,12 @@ mod tests {
     #[test]
     fn status_display_reads_clearly() {
         let enabled = Status::Enabled {
-            bucket: "restricted".to_string(),
+            bucket: "restricted-address-bucket".to_string(),
         };
-        assert_eq!(enabled.to_string(), "✓ enabled (bucket=restricted)");
+        assert_eq!(
+            enabled.to_string(),
+            "✓ enabled (bucket=restricted-address-bucket)"
+        );
         assert_eq!(
             Status::Disabled.to_string(),
             "✗ disabled (RESTRICTED_ADDRESS_S3_BUCKET not set)"

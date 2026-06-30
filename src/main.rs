@@ -20,13 +20,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // A configured but unreachable bucket aborts startup, so the service never serves
     // traffic with a broken screener.
-    let (_screener, screening) = bx402::init_screener(&config).await.unwrap_or_else(|err| {
+    let (screener, screening) = bx402::init_screener(&config).await.unwrap_or_else(|err| {
         eprintln!("{err}");
         std::process::exit(1);
     });
     println!("restricted address screening: {screening}");
 
-    let app = bx402::app(config).unwrap_or_else(|err| {
+    let app = bx402::app(config, screener).unwrap_or_else(|err| {
         eprintln!("{err}");
         std::process::exit(1);
     });

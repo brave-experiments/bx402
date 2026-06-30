@@ -17,6 +17,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use crate::screener::RestrictedAddressScreener;
 use crate::{AppError, Config, mpp, x402};
 
 /// The payment rail a request is attempting, determined solely by which payment
@@ -69,12 +70,20 @@ fn collision_400() -> Response {
 #[derive(Clone)]
 pub(crate) struct Context {
     pub(crate) x402: x402::Client,
+    /// Payer screener, shared by every rail. `None` when screening is not configured.
+    pub(crate) screener: Option<RestrictedAddressScreener>,
 }
 
-/// Assemble the dispatch context from config, building each rail's client.
-pub(crate) fn context(config: &Config) -> Result<Context, AppError> {
+/// Assemble the dispatch context from config and the already-built screener (the
+/// screener is built asynchronously at startup, so it is passed in rather than built
+/// here).
+pub(crate) fn context(
+    config: &Config,
+    screener: Option<RestrictedAddressScreener>,
+) -> Result<Context, AppError> {
     Ok(Context {
         x402: x402::client(config)?,
+        screener,
     })
 }
 
@@ -85,7 +94,7 @@ pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Nex
     match classify(req.headers()) {
         Rail::None => cold_402(&absolute_uri(&req)),
         Rail::Both => collision_400(),
-        Rail::X402 => x402::handle(ctx.x402, req, next).await,
+        Rail::X402 => x402::handle(ctx.x402, ctx.screener, req, next).await,
         // An MPP credential cannot be verified yet, so it pays for nothing:
         // answer with the cold 402 rather than serve an unpaid search.
         Rail::Mpp => cold_402(&absolute_uri(&req)),

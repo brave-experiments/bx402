@@ -54,8 +54,11 @@ pub fn banner() -> String {
 /// the binary via `tower::ServiceExt::oneshot` without binding a socket. Takes
 /// [`Config`] by value so tests can point the proxy at mock upstreams instead of the
 /// live Brave Search API and facilitator.
-pub fn app(config: Config) -> Result<Router, AppError> {
-    let context = dispatch::context(&config)?;
+pub fn app(
+    config: Config,
+    screener: Option<RestrictedAddressScreener>,
+) -> Result<Router, AppError> {
+    let context = dispatch::context(&config, screener)?;
     let state = AppState {
         client: reqwest::Client::new(),
         config: Arc::new(config),
@@ -195,7 +198,7 @@ mod tests {
         for (name, value) in headers_for(rail) {
             request = request.header(name, value);
         }
-        app(config)
+        app(config, None)
             .unwrap()
             .oneshot(request.body(Body::empty()).unwrap())
             .await
@@ -215,7 +218,7 @@ mod tests {
             "http://upstream.invalid".to_string(),
             "not a url".to_string(),
         );
-        assert!(matches!(app(config), Err(AppError::InvalidConfig(_))));
+        assert!(matches!(app(config, None), Err(AppError::InvalidConfig(_))));
     }
 
     #[tokio::test]
@@ -358,7 +361,7 @@ mod tests {
             .header("x-forwarded-proto", "https")
             .body(Body::empty())
             .unwrap();
-        let response = app(test_config("http://upstream.invalid".to_string()))
+        let response = app(test_config("http://upstream.invalid".to_string()), None)
             .unwrap()
             .oneshot(request)
             .await
@@ -394,7 +397,7 @@ mod tests {
             .await;
 
         let facilitator = mock_facilitator(true, true).await;
-        let response = app(config_with(upstream.uri(), facilitator.uri()))
+        let response = app(config_with(upstream.uri(), facilitator.uri()), None)
             .unwrap()
             .oneshot(paid_request())
             .await
@@ -430,7 +433,7 @@ mod tests {
             .await;
 
         let facilitator = mock_facilitator(false, true).await;
-        let response = app(config_with(upstream.uri(), facilitator.uri()))
+        let response = app(config_with(upstream.uri(), facilitator.uri()), None)
             .unwrap()
             .oneshot(paid_request())
             .await
@@ -455,7 +458,7 @@ mod tests {
             .await;
 
         let facilitator = mock_facilitator(true, false).await;
-        let response = app(config_with(upstream.uri(), facilitator.uri()))
+        let response = app(config_with(upstream.uri(), facilitator.uri()), None)
             .unwrap()
             .oneshot(paid_request())
             .await
@@ -466,5 +469,130 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"], "x402 payment could not be settled");
+    }
+
+    /// A paid `GET` whose payment payload names `from` as the payer, so the screener has
+    /// an address to check. The payload only needs `payload.authorization.from`; the
+    /// mock facilitator accepts the rest.
+    fn paid_request_from(from: &str) -> Request<Body> {
+        use base64::Engine;
+        let payload = serde_json::json!({ "payload": { "authorization": { "from": from } } });
+        let signature = base64::engine::general_purpose::STANDARD.encode(payload.to_string());
+        Request::builder()
+            .uri("/res/v1/web/search?q=rust")
+            .header("payment-signature", signature)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// The S3 key the screener looks up for `address`: `base64url(lowercase(address))`,
+    /// matching how the screener encodes and the x402 rail canonicalizes.
+    fn screening_key(address: &str) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(address.to_ascii_lowercase())
+    }
+
+    #[tokio::test]
+    async fn blocked_signer_is_refused_before_any_call() {
+        // Wire form is checksummed; the rail lowercases, so the stored key is lowercase.
+        let from = "0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B";
+        let s3 = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path(format!(
+                "/restricted-address-bucket/{}",
+                screening_key(from)
+            )))
+            .respond_with(ResponseTemplate::new(200)) // key exists: on the list
+            .mount(&s3)
+            .await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&s3)
+            .await;
+
+        // The search must never run for a blocked signer.
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(WEB_SEARCH_PATH))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&upstream)
+            .await;
+
+        let screener = crate::screener::test_screener(s3.uri(), "restricted-address-bucket");
+        // Facilitator is unreachable: a blocked signer must not reach it either.
+        let response = app(test_config(upstream.uri()), Some(screener))
+            .unwrap()
+            .oneshot(paid_request_from(from))
+            .await
+            .unwrap();
+
+        // Refused as a generic 402, like any rejected payment. The unreachable facilitator
+        // would 502 if the request reached verify, so 402 proves the block happened first.
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn allowed_signer_passes_through_to_search() {
+        // Every key 404s: the payer is not on the list.
+        let s3 = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&s3)
+            .await;
+
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(WEB_SEARCH_PATH))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "web": {} })),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let facilitator = mock_facilitator(true, true).await;
+        let screener = crate::screener::test_screener(s3.uri(), "restricted-address-bucket");
+        let response = app(
+            config_with(upstream.uri(), facilitator.uri()),
+            Some(screener),
+        )
+        .unwrap()
+        .oneshot(paid_request_from(
+            "0x1111111111111111111111111111111111111111",
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn unscreenable_signer_returns_503() {
+        // The bucket errors, so the payer cannot be screened: deny, do not serve.
+        let s3 = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&s3)
+            .await;
+
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(WEB_SEARCH_PATH))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&upstream)
+            .await;
+
+        let screener = crate::screener::test_screener(s3.uri(), "restricted-address-bucket");
+        let response = app(test_config(upstream.uri()), Some(screener))
+            .unwrap()
+            .oneshot(paid_request_from(
+                "0x2222222222222222222222222222222222222222",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

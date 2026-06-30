@@ -10,9 +10,12 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use std::time::Duration;
+
 use serde_json::{Value, json};
 use x402_axum::facilitator_client::FacilitatorClient;
 
+use crate::screener::{RestrictedAddressScreener, Screening};
 use crate::{AppError, Config};
 use x402_chain_eip155::{KnownNetworkEip155, V2Eip155Exact, chain::ChecksummedAddress};
 use x402_types::{
@@ -36,6 +39,10 @@ const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
 /// Flat price per request, in USDC base units (6 decimals, so `5_000` = 0.005 USDC).
 /// One rate for every request today; pricing may later vary by endpoint or by rail.
 const PRICE_USDC_BASE_UNITS: u64 = 5_000;
+
+/// How long a payer screen may take before it counts as unavailable. Bounds the paid
+/// request path; the screener's own client timeout is a looser startup backstop.
+const SCREEN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Returns `true` if the request carries an x402 V2 payment proof.
 pub(crate) fn has_payment(headers: &HeaderMap) -> bool {
@@ -105,19 +112,25 @@ pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
 /// * settlement fails: `502`, the response body withheld.
 pub(crate) async fn handle(
     Client(facilitator_client): Client,
+    screener: Option<RestrictedAddressScreener>,
     req: Request,
     next: Next,
 ) -> Response {
-    let request = match verify_request(req.headers()) {
-        Some(request) => request,
-        None => return payment_rejected("malformed x402 payment payload"),
+    let Some((request, payer)) = decode_payment(req.headers()) else {
+        return payment_rejected("malformed x402 payment payload");
     };
+
+    // Screen the payer before any facilitator or upstream call, so a blocked signer
+    // touches neither.
+    if let Some(denied) = screen_payer(screener.as_ref(), payer).await {
+        return denied;
+    }
 
     // Verify before doing any work. A facilitator we cannot reach is our failure,
     // not the client's, so it is a 502 rather than a 402.
     match facilitator_client.verify(&request).await {
         Ok(response) if is_valid(&response) => {}
-        Ok(_) => return payment_rejected("x402 payment did not verify"),
+        Ok(_) => return payment_rejected(GENERIC_REJECTION),
         Err(_) => return gateway_error("payment facilitator unavailable"),
     }
 
@@ -134,20 +147,66 @@ pub(crate) async fn handle(
     }
 }
 
-/// Decode the client's base64 JSON payment payload from `PAYMENT-SIGNATURE` and wrap
-/// it with our advertised [`requirements`] into the facilitator's verify/settle
-/// request. Returns `None` if the header is absent or not the base64 JSON required.
-fn verify_request(headers: &HeaderMap) -> Option<proto::VerifyRequest> {
+/// Shared message for every refused payment, so refusals are indistinguishable.
+const GENERIC_REJECTION: &str = "x402 payment did not verify";
+
+/// Screen the payer; returns the refusal to send, or `None` to proceed:
+///
+/// - allowed, or no screener configured: `None`
+/// - blocked, or no payer to screen: generic `402`
+/// - could not screen (error or timeout): `503`
+async fn screen_payer(
+    screener: Option<&RestrictedAddressScreener>,
+    payer: Option<String>,
+) -> Option<Response> {
+    let screener = screener?;
+    let Some(payer) = payer else {
+        return Some(payment_rejected(GENERIC_REJECTION));
+    };
+    // A timeout and a screen error both mean the same thing: we could not screen.
+    let screening = tokio::time::timeout(SCREEN_TIMEOUT, screener.screen(&payer))
+        .await
+        .ok()
+        .and_then(Result::ok);
+    match screening {
+        Some(Screening::Allowed) => None,
+        Some(Screening::Blocked) => Some(payment_rejected(GENERIC_REJECTION)),
+        None => Some(service_unavailable()),
+    }
+}
+
+/// Decode the client's base64 JSON payment payload from `PAYMENT-SIGNATURE` into the
+/// facilitator's verify/settle request (wrapping it with our advertised
+/// [`requirements`]) and the payer to screen. Returns `None` if the header is absent or
+/// not the base64 JSON required.
+///
+/// The payer is `Some` only for the eip3009 payload we advertise; a payload without
+/// `authorization.from` (e.g. a permit2 shape) yields `None`, which the caller rejects
+/// before any facilitator call when screening is on.
+fn decode_payment(headers: &HeaderMap) -> Option<(proto::VerifyRequest, Option<String>)> {
     let header = headers.get(V2_PAYMENT_HEADER)?.to_str().ok()?;
     let decoded = Base64Bytes::from(header.as_bytes()).decode().ok()?;
     let payload: Value = serde_json::from_slice(&decoded).ok()?;
+    let payer = payer_address(&payload);
     let body = json!({
         "x402Version": 2,
         "paymentPayload": payload,
         "paymentRequirements": requirements(),
     });
     let raw = serde_json::value::to_raw_value(&body).ok()?;
-    Some(proto::VerifyRequest::from(raw))
+    Some((proto::VerifyRequest::from(raw), payer))
+}
+
+/// The payer to screen: the eip3009 `authorization.from`, lowercased to the screener's
+/// canonical form (EVM addresses are case-insensitive hex). `None` when the payload has
+/// no such field.
+fn payer_address(payload: &Value) -> Option<String> {
+    let from = payload
+        .get("payload")?
+        .get("authorization")?
+        .get("from")?
+        .as_str()?;
+    Some(from.to_ascii_lowercase())
 }
 
 /// A verify response confirms the payment when `isValid` is true. The SDK returns the
@@ -198,6 +257,15 @@ fn payment_rejected(detail: &str) -> Response {
 /// A `502` for a payment we could neither verify nor settle through the facilitator.
 fn gateway_error(detail: &str) -> Response {
     (StatusCode::BAD_GATEWAY, Json(json!({ "error": detail }))).into_response()
+}
+
+/// A generic `503` for when the payer could not be screened (error or timeout).
+fn service_unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "service temporarily unavailable" })),
+    )
+        .into_response()
 }
 
 /// Decode a base64 `Payment-Response` receipt back to JSON, the test-side inverse of
