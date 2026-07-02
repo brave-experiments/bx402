@@ -5,6 +5,7 @@
 //!
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Router,
@@ -43,6 +44,13 @@ struct AppState {
 /// upstream path we forward to.
 const WEB_SEARCH_PATH: &str = "/res/v1/web/search";
 
+/// How long to wait for the upstream connection to establish before giving up.
+const SEARCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Overall deadline for one upstream search, so a stalled Brave Search API cannot
+/// pin the request task. A timeout relays as a `502`, like any transport failure.
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Human-readable service banner, printed on startup.
 pub fn banner() -> String {
     format!("bx402 v{}", env!("CARGO_PKG_VERSION"))
@@ -60,7 +68,13 @@ pub fn app(
 ) -> Result<Router, AppError> {
     let context = dispatch::context(&config, screener)?;
     let state = AppState {
-        client: reqwest::Client::new(),
+        // Build fails only if the TLS backend cannot initialize. That is a startup
+        // fault like a bad URL or bucket, so it aborts startup rather than panicking.
+        client: reqwest::Client::builder()
+            .connect_timeout(SEARCH_CONNECT_TIMEOUT)
+            .timeout(SEARCH_TIMEOUT)
+            .build()
+            .map_err(|err| AppError::InvalidConfig(format!("search client: {err}")))?,
         config: Arc::new(config),
     };
     let router = Router::new()
