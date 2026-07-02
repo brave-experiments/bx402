@@ -44,8 +44,13 @@ impl IntoResponse for AppError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "server misconfigured")
             }
         };
-        // The full error (with its source chain) belongs in our logs; the
-        // client only ever sees `message`.
+        // The client sees only `message`; the full error goes to our logs, a 5xx at
+        // `error` and a 4xx at `debug`.
+        if status.is_server_error() {
+            tracing::error!(error = ?self, "request failed");
+        } else {
+            tracing::debug!(error = ?self, "request rejected");
+        }
         (status, Json(json!({ "error": message }))).into_response()
     }
 }
