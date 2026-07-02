@@ -1,13 +1,10 @@
 //! Binary entry point for the `bx402` service.
 
-use std::error::Error;
-
 #[tokio::main]
 async fn main() {
     if let Err(err) = run().await {
-        // Log the `Display` form; returning the error from `main` would surface the
-        // `Debug` form instead.
-        tracing::error!("{err}");
+        // `{err:?}` prints anyhow's full `Caused by` chain.
+        tracing::error!("{err:?}");
         std::process::exit(1);
     }
 }
@@ -15,7 +12,7 @@ async fn main() {
 /// Boot the service: load configuration, wire dependencies, and serve until
 /// shutdown. Every startup failure flows out through `?` to the single exit
 /// site in `main`.
-async fn run() -> Result<(), Box<dyn Error>> {
+async fn run() -> anyhow::Result<()> {
     // Load a local `.env` for development (no-op if absent); real environment
     // variables still take precedence.
     dotenvy::dotenv().ok();

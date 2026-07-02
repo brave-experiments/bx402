@@ -13,6 +13,7 @@ unsafe_code = "forbid"
 all = { level = "deny", priority = -1 }
 
 [dependencies]
+anyhow = "1"
 axum = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 dotenvy = "0.15"
