@@ -131,7 +131,10 @@ pub(crate) async fn handle(
     match facilitator_client.verify(&request).await {
         Ok(response) if is_valid(&response) => {}
         Ok(_) => return payment_rejected(GENERIC_REJECTION),
-        Err(_) => return gateway_error("payment facilitator unavailable"),
+        Err(err) => {
+            tracing::error!(error = ?err, "x402 facilitator verify failed");
+            return gateway_error("payment facilitator unavailable");
+        }
     }
 
     let response = next.run(req).await;
@@ -143,12 +146,23 @@ pub(crate) async fn handle(
     // settles unchanged. Withhold the (already produced) body unless it settles.
     match facilitator_client.settle(&request).await {
         Ok(receipt) if settled(&receipt) => attach_receipt(response, &receipt),
-        _ => gateway_error("x402 payment could not be settled"),
+        Ok(receipt) => {
+            tracing::error!(?receipt, "x402 facilitator reported settlement failure");
+            gateway_error(SETTLE_FAILED)
+        }
+        Err(err) => {
+            tracing::error!(error = ?err, "x402 facilitator settle failed");
+            gateway_error(SETTLE_FAILED)
+        }
     }
 }
 
 /// Shared message for every refused payment, so refusals are indistinguishable.
 const GENERIC_REJECTION: &str = "x402 payment did not verify";
+
+/// Shared message for a payment we could not settle, whether the facilitator declined it
+/// or was unreachable, so the client cannot tell the two apart.
+const SETTLE_FAILED: &str = "x402 payment could not be settled";
 
 /// Screen the payer; returns the refusal to send, or `None` to proceed:
 ///
@@ -163,15 +177,21 @@ async fn screen_payer(
     let Some(payer) = payer else {
         return Some(payment_rejected(GENERIC_REJECTION));
     };
-    // A timeout and a screen error both mean the same thing: we could not screen.
-    let screening = tokio::time::timeout(SCREEN_TIMEOUT, screener.screen(&payer))
-        .await
-        .ok()
-        .and_then(Result::ok);
-    match screening {
-        Some(Screening::Allowed) => None,
-        Some(Screening::Blocked) => Some(payment_rejected(GENERIC_REJECTION)),
-        None => Some(service_unavailable()),
+    // A timeout and a screen error both deny the same way, differing only in the log.
+    let screened = match tokio::time::timeout(SCREEN_TIMEOUT, screener.screen(&payer)).await {
+        Ok(screened) => screened,
+        Err(_elapsed) => {
+            tracing::error!("payer screening timed out after {SCREEN_TIMEOUT:?}");
+            return Some(service_unavailable());
+        }
+    };
+    match screened {
+        Ok(Screening::Allowed) => None,
+        Ok(Screening::Blocked) => Some(payment_rejected(GENERIC_REJECTION)),
+        Err(err) => {
+            tracing::error!(error = ?err, "payer screening failed");
+            Some(service_unavailable())
+        }
     }
 }
 

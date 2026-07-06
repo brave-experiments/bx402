@@ -22,16 +22,16 @@
 //! One screener backs every chain this way. Adapted from the Go reference
 //! (`brave-intl/compliance-ops`).
 
-use std::error::Error;
 use std::time::Duration;
 
+use anyhow::Context;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::operation::head_object::HeadObjectError as SdkErr;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-use crate::{AppError, Config};
+use crate::Config;
 
 /// Canary key used to probe the bucket at startup.
 const CANARY_KEY: &str = "bx402.canary";
@@ -126,11 +126,9 @@ impl std::fmt::Display for Status {
 ///
 /// - bucket unset: returns `(None, Disabled)`, screening off
 /// - bucket set: builds the AWS client and probes the bucket once. A reachable bucket
-///   returns `(Some, Enabled)`; any probe failure aborts startup with
-///   [`AppError::InvalidConfig`], so a misconfigured screener never serves traffic.
-pub async fn init(
-    config: &Config,
-) -> Result<(Option<RestrictedAddressScreener>, Status), AppError> {
+///   returns `(Some, Enabled)`; any probe failure is an error that aborts startup, so a
+///   misconfigured screener never serves traffic.
+pub async fn init(config: &Config) -> anyhow::Result<(Option<RestrictedAddressScreener>, Status)> {
     let Some(bucket) = config.restricted_address_s3_bucket.clone() else {
         return Ok((None, Status::Disabled));
     };
@@ -153,36 +151,17 @@ pub async fn init(
 async fn init_with(
     client: aws_sdk_s3::Client,
     bucket: String,
-) -> Result<(RestrictedAddressScreener, Status), AppError> {
+) -> anyhow::Result<(RestrictedAddressScreener, Status)> {
     let screener = RestrictedAddressScreener::new(client, bucket.clone());
-    match screener.head_key(CANARY_KEY.to_string()).await {
-        // Reachable (404, or even a 200) means credentials and permissions work.
-        Ok(_) => Ok((screener, Status::Enabled { bucket })),
-        Err(err) => {
-            // Report the underlying cause (no credentials, IAM 403, timeout), not the
-            // generic wrapper message.
-            let cause = err
-                .source()
-                .map(error_chain)
-                .unwrap_or_else(|| err.to_string());
-            Err(AppError::InvalidConfig(format!(
-                "restricted address screening probe failed: {cause}"
-            )))
-        }
-    }
-}
-
-/// Flatten an error and its `source` chain into one line, so the underlying cause (an
-/// IAM 403, a timeout) shows in the startup log.
-fn error_chain(err: &dyn std::error::Error) -> String {
-    let mut message = err.to_string();
-    let mut source = err.source();
-    while let Some(cause) = source {
-        message.push_str(": ");
-        message.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    message
+    // A reachable bucket (404, or even a 200) proves credentials and permissions work.
+    // On failure, `?` carries the real cause (bad creds, IAM 403, timeout) up the chain.
+    screener
+        .head_key(CANARY_KEY.to_string())
+        .await
+        .with_context(|| {
+            format!("restricted address screening probe failed for bucket {bucket}")
+        })?;
+    Ok((screener, Status::Enabled { bucket }))
 }
 
 /// Build an S3 client pointed at a wiremock server standing in for S3, shared by tests
@@ -339,7 +318,7 @@ mod tests {
     }
 
     /// Run `init_with` against a mock S3 that answers every `HEAD` with `status`.
-    async fn init_against(status: u16) -> Result<(RestrictedAddressScreener, Status), AppError> {
+    async fn init_against(status: u16) -> anyhow::Result<(RestrictedAddressScreener, Status)> {
         let server = MockServer::start().await;
         Mock::given(method("HEAD"))
             .respond_with(ResponseTemplate::new(status))
@@ -360,10 +339,16 @@ mod tests {
 
     #[tokio::test]
     async fn init_fails_fast_on_probe_error() {
-        assert!(matches!(
-            init_against(403).await,
-            Err(AppError::InvalidConfig(_))
-        ));
+        // `.err()` drops the `Ok` value, which is not `Debug`, unlike `unwrap_err`.
+        let err = init_against(403)
+            .await
+            .err()
+            .expect("a probe error must abort init");
+        assert!(
+            err.to_string()
+                .contains("restricted address screening probe failed"),
+            "error was: {err:?}",
+        );
     }
 
     #[test]

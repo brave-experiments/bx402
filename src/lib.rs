@@ -83,6 +83,8 @@ pub fn app(
             WEB_SEARCH_PATH,
             get(search).layer(middleware::from_fn_with_state(context, dispatch::dispatch)),
         )
+        // Span and log each request; failures log at `error`, so a 5xx is visible.
+        .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);
     Ok(router)
 }
