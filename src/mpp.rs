@@ -17,6 +17,7 @@ use axum::{
 use serde_json::json;
 
 use mpp::protocol::core::{PaymentCredential, Receipt};
+use mpp::protocol::intents::ChargeRequest;
 use mpp::server::{ErrorCode, Mpp, TempoChargeMethod, TempoConfig, TempoProvider, tempo};
 
 use crate::{AppError, Config};
@@ -34,6 +35,13 @@ const REALM: &str = "bx402";
 
 /// The EVM treasury address that receives MPP payments (the challenge recipient).
 const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
+
+/// Flat price per request in base units of the challenge currency (6 decimals, so
+/// `5_000` = 0.005). The currency follows the configured network: pathUSD on the
+/// Moderato testnet, USDC on Tempo mainnet, each worth one dollar. The x402 rail
+/// charges the same 0.005 through its own `PRICE_USDC_BASE_UNITS`; a price change
+/// edits both consts.
+const PRICE_USD_BASE_UNITS: u64 = 5_000;
 
 /// The concrete SDK handler behind [`Client`]: the Tempo charge method over the
 /// SDK's own RPC provider, named once so signatures stay readable.
@@ -90,7 +98,8 @@ pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
 ///
 /// A credential only verifies against a challenge this service issued: the SDK
 /// recomputes the challenge id (an HMAC under our secret key) and checks the
-/// echoed charge against the bound currency and recipient.
+/// echoed charge against [`charge_request`], so a credential minted for another
+/// amount, currency, or recipient is refused.
 pub(crate) async fn handle(Client(handler): Client, req: Request, next: Next) -> Response {
     let Some(credential) = credential(req.headers()) else {
         return payment_rejected();
@@ -102,7 +111,10 @@ pub(crate) async fn handle(Client(handler): Client, req: Request, next: Next) ->
 
     // A Tempo RPC we cannot reach is our failure, not the client's, so it is a 502
     // rather than a 402.
-    let receipt = match handler.verify_credential(&credential).await {
+    let receipt = match handler
+        .verify_credential_with_expected_request(&credential, &charge_request(&handler))
+        .await
+    {
         Ok(receipt) => receipt,
         Err(err) if err.code == Some(ErrorCode::NetworkError) => {
             tracing::error!(error = ?err, "mpp verify failed: tempo rpc unreachable");
@@ -132,6 +144,23 @@ fn attach_receipt(mut response: Response, receipt: &Receipt) -> Response {
         None => tracing::error!("mpp settlement receipt could not be encoded as a header"),
     }
     response
+}
+
+/// The charge every request must pay: our flat price to our treasury, in the
+/// handler's bound currency on its bound chain. Verification compares the
+/// credential's echoed amount, currency, recipient, and transfer routing against
+/// this value.
+fn charge_request(handler: &Handler) -> ChargeRequest {
+    ChargeRequest {
+        amount: PRICE_USD_BASE_UNITS.to_string(),
+        currency: handler
+            .currency()
+            .expect("currency is bound by Mpp::create")
+            .to_string(),
+        recipient: handler.recipient().map(str::to_string),
+        method_details: handler.chain_id().map(|id| json!({ "chainId": id })),
+        ..Default::default()
+    }
 }
 
 /// Returns `true` when the credential pays with a signed transaction that this
@@ -218,6 +247,41 @@ mod tests {
         for (name, payload, expected) in cases {
             let credential = PaymentCredential::new(echo(), payload);
             assert_eq!(pays_by_transaction(&credential), expected, "case: {name}");
+        }
+    }
+
+    #[test]
+    fn charge_request_follows_the_network_and_pins_the_price() {
+        // The SDK's default currency per network: pathUSD (the TIP-20 precompile) on
+        // the Moderato testnet, USDC on Tempo mainnet.
+        let cases = [
+            (
+                "https://rpc.moderato.tempo.xyz",
+                "0x20c0000000000000000000000000000000000000",
+                42431,
+            ),
+            (
+                "https://rpc.tempo.xyz",
+                "0x20C000000000000000000000b9537d11c60E8b50",
+                4217,
+            ),
+        ];
+        for (rpc_url, currency, chain_id) in cases {
+            let Client(handler) = client(&test_config(rpc_url)).unwrap();
+            let request = charge_request(&handler);
+
+            assert_eq!(
+                request.amount,
+                PRICE_USD_BASE_UNITS.to_string(),
+                "{rpc_url}"
+            );
+            assert_eq!(request.currency, currency, "{rpc_url}");
+            assert_eq!(request.recipient.as_deref(), Some(PAY_TO_EVM), "{rpc_url}");
+            assert_eq!(
+                request.method_details,
+                Some(json!({ "chainId": chain_id })),
+                "{rpc_url}"
+            );
         }
     }
 
