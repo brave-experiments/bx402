@@ -29,6 +29,13 @@ x402-axum = "2.0.0"
 # Seller side of the Machine Payments Protocol on Tempo. The only default feature picks
 # a TLS stack for the crate's optional HTTP client, which we don't enable, so defaults stay off.
 mpp = { version = "0.10.4", default-features = false, features = ["server", "tempo"] }
+# The MPP rail recovers a payment's signer from its signed Tempo transaction, which
+# needs the transaction type and the signature-recovery trait directly. All three are
+# already in the tree under mpp at these versions; a unit test fails if the lock ever
+# resolves a second tempo-primitives, so our decode cannot fork from the SDK's.
+tempo-primitives = "1.8"
+alloy-consensus = "2"
+alloy-primitives = "1"
 # Default features pull a vulnerable TLS stack (rustls-webpki 0.101.7). We opt out and
 # enable only what we need: default-https-client for HTTPS, rt-tokio for the runtime.
 aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
