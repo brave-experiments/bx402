@@ -16,7 +16,7 @@ use axum::{
 };
 use serde_json::json;
 
-use mpp::protocol::core::PaymentCredential;
+use mpp::protocol::core::{PaymentCredential, Receipt};
 use mpp::server::{ErrorCode, Mpp, TempoChargeMethod, TempoConfig, TempoProvider, tempo};
 
 use crate::{AppError, Config};
@@ -24,6 +24,10 @@ use crate::{AppError, Config};
 /// MPP's `WWW-Authenticate` challenge value, using the `Payment` scheme (the client
 /// replies with `Authorization: Payment <credential>`). Real params come from `mpp-rs`.
 const CHALLENGE: &str = r#"Payment realm="bx402""#;
+
+/// The settlement receipt returns to the client in the `Payment-Receipt` response
+/// header, the dual of the `Authorization` request header.
+const PAYMENT_RECEIPT_HEADER: &str = "payment-receipt";
 
 /// The realm named in every MPP challenge and echoed back in every credential.
 const REALM: &str = "bx402";
@@ -80,7 +84,9 @@ pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
 /// * credential missing, malformed, not a signed transaction, or rejected: `402`,
 ///   before any upstream call.
 /// * Tempo RPC unreachable: `502`.
-/// * verified and settled: the search runs.
+/// * verified and settled: the search runs, and the response carries the
+///   `Payment-Receipt` header whatever its status, because the payment has
+///   already settled.
 ///
 /// A credential only verifies against a challenge this service issued: the SDK
 /// recomputes the challenge id (an HMAC under our secret key) and checks the
@@ -96,14 +102,36 @@ pub(crate) async fn handle(Client(handler): Client, req: Request, next: Next) ->
 
     // A Tempo RPC we cannot reach is our failure, not the client's, so it is a 502
     // rather than a 402.
-    match handler.verify_credential(&credential).await {
-        Ok(_) => next.run(req).await,
+    let receipt = match handler.verify_credential(&credential).await {
+        Ok(receipt) => receipt,
         Err(err) if err.code == Some(ErrorCode::NetworkError) => {
             tracing::error!(error = ?err, "mpp verify failed: tempo rpc unreachable");
-            gateway_error("payment network unavailable")
+            return gateway_error("payment network unavailable");
         }
-        Err(_) => payment_rejected(),
+        Err(_) => return payment_rejected(),
+    };
+
+    // The payment has already settled, so the receipt rides on whatever the search
+    // returns: the client paid and gets their proof either way.
+    attach_receipt(next.run(req).await, &receipt)
+}
+
+/// Attach the settlement receipt as the `Payment-Receipt` header the client reads
+/// back, leaving the response body untouched.
+fn attach_receipt(mut response: Response, receipt: &Receipt) -> Response {
+    let value = receipt
+        .to_header()
+        .ok()
+        .and_then(|value| HeaderValue::from_str(&value).ok());
+    match value {
+        Some(value) => {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static(PAYMENT_RECEIPT_HEADER), value);
+        }
+        None => tracing::error!("mpp settlement receipt could not be encoded as a header"),
     }
+    response
 }
 
 /// Returns `true` when the credential pays with a signed transaction that this
@@ -191,6 +219,22 @@ mod tests {
             let credential = PaymentCredential::new(echo(), payload);
             assert_eq!(pays_by_transaction(&credential), expected, "case: {name}");
         }
+    }
+
+    #[test]
+    fn attached_receipt_parses_back_from_the_header() {
+        let receipt = Receipt::success("tempo", "0xtxhash");
+        let response = attach_receipt(().into_response(), &receipt);
+
+        let header = response
+            .headers()
+            .get(PAYMENT_RECEIPT_HEADER)
+            .expect("the receipt header is attached")
+            .to_str()
+            .unwrap();
+        let parsed = Receipt::from_header(header).expect("the header parses back");
+        assert!(parsed.is_success());
+        assert_eq!(parsed.reference, "0xtxhash");
     }
 
     #[test]
