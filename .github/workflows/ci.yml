@@ -65,15 +65,15 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   audit:
-    name: cargo-audit
+    name: cargo-deny
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
-          tool: cargo-audit
-      - name: Audit dependencies for RUSTSEC advisories
-        run: cargo audit
+          tool: cargo-deny
+      - name: Audit compiled dependencies for RUSTSEC advisories
+        run: cargo deny check advisories
 
   lockfile:
     name: lockfile
