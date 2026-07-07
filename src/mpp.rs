@@ -31,9 +31,6 @@ const REALM: &str = "bx402";
 /// The EVM treasury address that receives MPP payments (the challenge recipient).
 const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
 
-/// Shared message for every refused payment, so refusals are indistinguishable.
-const GENERIC_REJECTION: &str = "mpp payment did not verify";
-
 /// The concrete SDK handler behind [`Client`]: the Tempo charge method over the
 /// SDK's own RPC provider, named once so signatures stay readable.
 type Handler = Mpp<TempoChargeMethod<TempoProvider>>;
@@ -80,7 +77,8 @@ pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
 /// transfer and settles it on Tempo in one call, so the charge lands before the
 /// search runs:
 ///
-/// * credential missing, malformed, or rejected: `402`, before any upstream call.
+/// * credential missing, malformed, not a signed transaction, or rejected: `402`,
+///   before any upstream call.
 /// * Tempo RPC unreachable: `502`.
 /// * verified and settled: the search runs.
 ///
@@ -89,8 +87,12 @@ pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
 /// echoed charge against the bound currency and recipient.
 pub(crate) async fn handle(Client(handler): Client, req: Request, next: Next) -> Response {
     let Some(credential) = credential(req.headers()) else {
-        return payment_rejected(GENERIC_REJECTION);
+        return payment_rejected();
     };
+
+    if !pays_by_transaction(&credential) {
+        return payment_rejected();
+    }
 
     // A Tempo RPC we cannot reach is our failure, not the client's, so it is a 502
     // rather than a 402.
@@ -100,8 +102,18 @@ pub(crate) async fn handle(Client(handler): Client, req: Request, next: Next) ->
             tracing::error!(error = ?err, "mpp verify failed: tempo rpc unreachable");
             gateway_error("payment network unavailable")
         }
-        Err(_) => payment_rejected(GENERIC_REJECTION),
+        Err(_) => payment_rejected(),
     }
+}
+
+/// Returns `true` when the credential pays with a signed transaction that this
+/// service broadcasts during verification. A hash credential says the client
+/// already broadcast the transfer itself, settling before anything was checked,
+/// so it does not pay here.
+fn pays_by_transaction(credential: &PaymentCredential) -> bool {
+    credential
+        .charge_payload()
+        .is_ok_and(|payload| payload.is_transaction())
 }
 
 /// Parse the MPP credential from the `Authorization` header. Returns `None` if the
@@ -111,11 +123,12 @@ fn credential(headers: &HeaderMap) -> Option<PaymentCredential> {
     PaymentCredential::from_header(header).ok()
 }
 
-/// A `402` telling the client their MPP payment was missing, malformed, or rejected.
-fn payment_rejected(detail: &str) -> Response {
+/// A `402` refusing the payment. Every refusal carries the same message, so a
+/// missing, malformed, non-transaction, and rejected credential all read alike.
+fn payment_rejected() -> Response {
     (
         StatusCode::PAYMENT_REQUIRED,
-        Json(json!({ "error": detail })),
+        Json(json!({ "error": "mpp payment did not verify" })),
     )
         .into_response()
 }
@@ -144,6 +157,40 @@ mod tests {
     fn client_rejects_an_unparseable_rpc_url() {
         let err = client(&test_config("not a url")).map(|_| ()).unwrap_err();
         assert!(matches!(err, AppError::InvalidConfig(_)));
+    }
+
+    /// A minimal challenge echo; the payload gate reads only the payload beside it.
+    fn echo() -> mpp::protocol::core::ChallengeEcho {
+        mpp::protocol::core::ChallengeEcho {
+            id: "id".into(),
+            realm: REALM.into(),
+            method: "tempo".into(),
+            intent: "charge".into(),
+            request: mpp::protocol::core::Base64UrlJson::from_raw("e30"),
+            expires: None,
+            digest: None,
+            opaque: None,
+        }
+    }
+
+    #[test]
+    fn only_a_signed_transaction_payload_pays() {
+        use mpp::protocol::core::PaymentPayload;
+
+        let cases = [
+            (
+                "transaction",
+                json!(PaymentPayload::transaction("0xsigned")),
+                true,
+            ),
+            ("hash", json!(PaymentPayload::hash("0xhash")), false),
+            ("proof", json!(PaymentPayload::proof("0xsig")), false),
+            ("arbitrary json", json!({ "type": "mystery" }), false),
+        ];
+        for (name, payload, expected) in cases {
+            let credential = PaymentCredential::new(echo(), payload);
+            assert_eq!(pays_by_transaction(&credential), expected, "case: {name}");
+        }
     }
 
     #[test]
