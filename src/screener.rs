@@ -284,6 +284,8 @@ mod tests {
             brave_search_api_key: "key".to_string(),
             brave_search_api_base_url: "http://upstream.invalid".to_string(),
             x402_facilitator_url: "http://facilitator.invalid".to_string(),
+            mpp_rpc_url: "http://tempo.invalid".to_string(),
+            mpp_secret_key: "test-secret".to_string(),
             restricted_address_s3_bucket: None,
         };
         let (screener, status) = init(&config).await.unwrap();

@@ -17,6 +17,12 @@ pub struct Config {
     /// Base URL of the x402 facilitator that verifies and settles payments.
     /// Docs: <https://docs.x402.org/core-concepts/facilitator>
     pub x402_facilitator_url: String,
+    /// Tempo RPC endpoint the MPP rail verifies and settles payments against. The
+    /// URL also selects the network: a Moderato URL means the testnet chain.
+    pub mpp_rpc_url: String,
+    /// Secret that marks MPP challenges as ours. Challenge ids are HMACs under this
+    /// key, so only a credential answering a challenge this service issued verifies.
+    pub mpp_secret_key: String,
     /// S3 bucket holding the restricted-address list. `None` turns screening off,
     /// the default for local and testnet runs.
     pub restricted_address_s3_bucket: Option<String>,
@@ -28,6 +34,8 @@ impl Config {
     ///
     /// * `BRAVE_SEARCH_API_KEY` (required): forwarded upstream as `X-Subscription-Token`.
     /// * `X402_FACILITATOR_URL` (required): base URL of the x402 facilitator.
+    /// * `MPP_RPC_URL` (required): Tempo RPC endpoint for the MPP rail.
+    /// * `MPP_SECRET_KEY` (required): HMAC secret binding MPP challenges to this service.
     /// * `BRAVE_SEARCH_API_BASE_URL` (optional): defaults to the public Brave Search API endpoint.
     /// * `RESTRICTED_ADDRESS_S3_BUCKET` (optional): unset or empty turns screening off.
     ///
@@ -38,6 +46,8 @@ impl Config {
         let brave_search_api_base_url = env::var("BRAVE_SEARCH_API_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_BRAVE_SEARCH_API_BASE_URL.to_string());
         let x402_facilitator_url = require_var("X402_FACILITATOR_URL")?;
+        let mpp_rpc_url = require_var("MPP_RPC_URL")?;
+        let mpp_secret_key = require_var("MPP_SECRET_KEY")?;
         let restricted_address_s3_bucket = env::var("RESTRICTED_ADDRESS_S3_BUCKET")
             .ok()
             .filter(|bucket| !bucket.is_empty());
@@ -45,6 +55,8 @@ impl Config {
             brave_search_api_key,
             brave_search_api_base_url,
             x402_facilitator_url,
+            mpp_rpc_url,
+            mpp_secret_key,
             restricted_address_s3_bucket,
         })
     }

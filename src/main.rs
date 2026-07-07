@@ -23,6 +23,7 @@ async fn run() -> anyhow::Result<()> {
     let config = bx402::Config::from_env()?;
     tracing::info!("brave search api: {}", config.brave_search_api_base_url);
     tracing::info!("x402 facilitator: {}", config.x402_facilitator_url);
+    tracing::info!("mpp tempo rpc: {}", config.mpp_rpc_url);
 
     // A configured but unreachable bucket aborts startup, so the service never serves
     // traffic with a broken screener.

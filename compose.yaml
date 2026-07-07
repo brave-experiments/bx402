@@ -6,6 +6,8 @@ services:
     environment:
       BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY}
       X402_FACILITATOR_URL: http://facilitator:8080
+      MPP_RPC_URL: ${MPP_RPC_URL:-https://rpc.moderato.tempo.xyz}
+      MPP_SECRET_KEY: ${MPP_SECRET_KEY}
     depends_on:
       facilitator:
         condition: service_healthy
