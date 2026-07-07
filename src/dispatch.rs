@@ -101,7 +101,7 @@ pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Nex
         Rail::None => cold_402(&ctx.mpp, &absolute_uri(&req)),
         Rail::Both => collision_400(),
         Rail::X402 => x402::handle(ctx.x402, ctx.screener, req, next).await,
-        Rail::Mpp => mpp::handle(ctx.mpp, req, next).await,
+        Rail::Mpp => mpp::handle(ctx.mpp, ctx.screener, req, next).await,
     }
 }
 
