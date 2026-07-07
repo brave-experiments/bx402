@@ -7,6 +7,8 @@
 //! Unlike x402 there is no facilitator service behind this rail: the `mpp` SDK
 //! verifies a credential and settles it on Tempo in the same call.
 
+use std::time::Duration;
+
 use axum::{
     Json,
     extract::Request,
@@ -23,6 +25,7 @@ use mpp::protocol::methods::tempo::TEMPO_TX_TYPE_ID;
 use mpp::server::{ErrorCode, Mpp, TempoChargeMethod, TempoConfig, TempoProvider, tempo};
 use tempo_primitives::transaction::AASigned;
 
+use crate::screener::{RestrictedAddressScreener, Screening};
 use crate::{AppError, Config};
 
 /// The settlement receipt returns to the client in the `Payment-Receipt` response
@@ -41,6 +44,10 @@ const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
 /// charges the same 0.005 through its own `PRICE_USDC_BASE_UNITS`; a price change
 /// edits both consts.
 const PRICE_USD_BASE_UNITS: u64 = 5_000;
+
+/// How long a signer screen may take before it counts as unavailable. Bounds the
+/// paid request path; the screener's own client timeout is a looser startup backstop.
+const SCREEN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The concrete SDK handler behind [`Client`]: the Tempo charge method over the
 /// SDK's own RPC provider, named once so signatures stay readable.
@@ -109,13 +116,24 @@ pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
 /// recomputes the challenge id (an HMAC under our secret key) and checks the
 /// echoed charge against [`charge_request`], so a credential minted for another
 /// amount, currency, or recipient is refused.
-pub(crate) async fn handle(Client(handler): Client, req: Request, next: Next) -> Response {
+pub(crate) async fn handle(
+    Client(handler): Client,
+    screener: Option<RestrictedAddressScreener>,
+    req: Request,
+    next: Next,
+) -> Response {
     let Some(credential) = credential(req.headers()) else {
         return payment_rejected();
     };
 
     if !pays_by_transaction(&credential) {
         return payment_rejected();
+    }
+
+    // Screen the transfer's signer before verification, so a blocked payer's
+    // transaction is never broadcast and no funds move.
+    if let Some(denied) = screen_signer(screener.as_ref(), signer_address(&credential)).await {
+        return denied;
     }
 
     // A Tempo RPC we cannot reach is our failure, not the client's, so it is a 502
@@ -172,12 +190,42 @@ fn charge_request(handler: &Handler) -> ChargeRequest {
     }
 }
 
+/// Screen the transaction's signer; returns the refusal to send, or `None` to proceed:
+///
+/// - allowed, or no screener configured: `None`
+/// - blocked, or no signer to screen: generic `402`
+/// - could not screen (error or timeout): `503`
+async fn screen_signer(
+    screener: Option<&RestrictedAddressScreener>,
+    signer: Option<String>,
+) -> Option<Response> {
+    let screener = screener?;
+    let Some(signer) = signer else {
+        return Some(payment_rejected());
+    };
+    // A timeout and a screen error both deny the same way, differing only in the log.
+    let screened = match tokio::time::timeout(SCREEN_TIMEOUT, screener.screen(&signer)).await {
+        Ok(screened) => screened,
+        Err(_elapsed) => {
+            tracing::error!("signer screening timed out after {SCREEN_TIMEOUT:?}");
+            return Some(service_unavailable());
+        }
+    };
+    match screened {
+        Ok(Screening::Allowed) => None,
+        Ok(Screening::Blocked) => Some(payment_rejected()),
+        Err(err) => {
+            tracing::error!(error = ?err, "signer screening failed");
+            Some(service_unavailable())
+        }
+    }
+}
+
 /// The payer, recovered from the signed transaction's own signature: the address
 /// the transfer draws from, independent of anything the credential envelope
 /// claims. Lowercase 0x hex, the screener's canonical form for EVM addresses.
 /// `None` when the payload is not a decodable signed Tempo transaction, which
 /// verification would refuse anyway.
-#[allow(dead_code, reason = "screening does not gate the pay flow")]
 fn signer_address(credential: &PaymentCredential) -> Option<String> {
     let payload = credential.charge_payload().ok()?;
     let bytes = payload.signed_tx()?.parse::<Bytes>().ok()?;
@@ -220,6 +268,15 @@ fn payment_rejected() -> Response {
 /// A `502` for a payment we could not verify because Tempo was unreachable.
 fn gateway_error(detail: &str) -> Response {
     (StatusCode::BAD_GATEWAY, Json(json!({ "error": detail }))).into_response()
+}
+
+/// A generic `503` for when the signer could not be screened (error or timeout).
+fn service_unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "service temporarily unavailable" })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -364,6 +421,51 @@ mod tests {
             let credential = PaymentCredential::new(echo(), payload);
             assert!(signer_address(&credential).is_none(), "case: {name}");
         }
+    }
+
+    #[tokio::test]
+    async fn screening_outcomes_map_to_responses() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // The screener HEADs the S3 bucket: 200 is a list hit, 404 a miss, anything
+        // else means the list could not be consulted.
+        let cases = [
+            (200, Some(StatusCode::PAYMENT_REQUIRED)),
+            (404, None),
+            (500, Some(StatusCode::SERVICE_UNAVAILABLE)),
+        ];
+        for (s3_status, expected) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("HEAD"))
+                .respond_with(ResponseTemplate::new(s3_status))
+                .mount(&server)
+                .await;
+            let screener = crate::screener::test_screener(server.uri(), "restricted");
+
+            let refusal = screen_signer(Some(&screener), Some("0xsigner".to_string())).await;
+            assert_eq!(
+                refusal.map(|response| response.status()),
+                expected,
+                "s3 status: {s3_status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn screening_requires_a_recoverable_signer() {
+        // With a screener configured, a payment whose signer cannot be recovered is
+        // refused without consulting anything (the endpoint is unreachable).
+        let screener =
+            crate::screener::test_screener("http://127.0.0.1:1".to_string(), "restricted");
+        let refusal = screen_signer(Some(&screener), None).await;
+        assert_eq!(
+            refusal.map(|response| response.status()),
+            Some(StatusCode::PAYMENT_REQUIRED)
+        );
+
+        // Without a screener there is nothing to consult and the flow proceeds.
+        assert!(screen_signer(None, None).await.is_none());
     }
 
     #[test]
