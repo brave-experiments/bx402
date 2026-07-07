@@ -22,10 +22,6 @@ use mpp::server::{ErrorCode, Mpp, TempoChargeMethod, TempoConfig, TempoProvider,
 
 use crate::{AppError, Config};
 
-/// MPP's `WWW-Authenticate` challenge value, using the `Payment` scheme (the client
-/// replies with `Authorization: Payment <credential>`). Real params come from `mpp-rs`.
-const CHALLENGE: &str = r#"Payment realm="bx402""#;
-
 /// The settlement receipt returns to the client in the `Payment-Receipt` response
 /// header, the dual of the `Authorization` request header.
 const PAYMENT_RECEIPT_HEADER: &str = "payment-receipt";
@@ -52,15 +48,25 @@ pub(crate) fn has_credential(headers: &HeaderMap) -> bool {
     headers.contains_key(header::AUTHORIZATION)
 }
 
-/// The MPP contribution to the cold `402`: the `WWW-Authenticate` response header
-/// (name and challenge value) the client answers on the MPP rail. Out of the cold
-/// `402` while the static value advertises no real charge.
-#[expect(dead_code, reason = "the cold 402 does not advertise the MPP rail")]
-pub(crate) fn challenge() -> (HeaderName, HeaderValue) {
-    (
-        header::WWW_AUTHENTICATE,
-        HeaderValue::from_static(CHALLENGE),
-    )
+/// The MPP contribution to the cold `402`: a fresh `WWW-Authenticate: Payment`
+/// challenge carrying the charge a credential must answer (the `Payment` scheme;
+/// the client replies with `Authorization: Payment <credential>`). Minted per
+/// request because every challenge is HMAC-signed and expires. `None` if the
+/// challenge cannot be built or encoded, leaving the `402` advertising x402 alone.
+pub(crate) fn challenge(client: &Client) -> Option<(HeaderName, HeaderValue)> {
+    let Client(handler) = client;
+    match handler
+        .charge_challenge_with_options(&charge_request(handler), None, None)
+        .and_then(|challenge| challenge.to_header())
+        .ok()
+        .and_then(|value| HeaderValue::from_str(&value).ok())
+    {
+        Some(value) => Some((header::WWW_AUTHENTICATE, value)),
+        None => {
+            tracing::error!("mpp challenge could not be built");
+            None
+        }
+    }
 }
 
 /// The MPP payment handler, newtyped so the rest of the crate names this module's
@@ -147,9 +153,9 @@ fn attach_receipt(mut response: Response, receipt: &Receipt) -> Response {
 }
 
 /// The charge every request must pay: our flat price to our treasury, in the
-/// handler's bound currency on its bound chain. Verification compares the
-/// credential's echoed amount, currency, recipient, and transfer routing against
-/// this value.
+/// handler's bound currency on its bound chain. The same value seeds the
+/// advertised challenge and the expectation a credential is verified against, so
+/// there is one source of truth for what we charge.
 fn charge_request(handler: &Handler) -> ChargeRequest {
     ChargeRequest {
         amount: PRICE_USD_BASE_UNITS.to_string(),
@@ -248,6 +254,28 @@ mod tests {
             let credential = PaymentCredential::new(echo(), payload);
             assert_eq!(pays_by_transaction(&credential), expected, "case: {name}");
         }
+    }
+
+    #[test]
+    fn challenge_advertises_the_charge_credentials_answer() {
+        let client = client(&test_config("https://rpc.moderato.tempo.xyz")).unwrap();
+        let (name, value) = challenge(&client).expect("the challenge builds");
+        assert_eq!(name, header::WWW_AUTHENTICATE);
+
+        // The header parses back to a signed, expiring challenge for the same
+        // charge a credential is verified against.
+        let parsed = mpp::protocol::core::parse_www_authenticate(value.to_str().unwrap()).unwrap();
+        assert_eq!(parsed.realm, REALM);
+        assert!(!parsed.id.is_empty());
+        assert!(parsed.expires.is_some());
+
+        let Client(handler) = &client;
+        let expected = charge_request(handler);
+        let advertised: ChargeRequest = parsed.request.decode().unwrap();
+        assert_eq!(advertised.amount, expected.amount);
+        assert_eq!(advertised.currency, expected.currency);
+        assert_eq!(advertised.recipient, expected.recipient);
+        assert_eq!(advertised.method_details, expected.method_details);
     }
 
     #[test]
