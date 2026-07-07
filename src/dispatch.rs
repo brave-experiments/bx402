@@ -5,8 +5,7 @@
 //!
 //! * **cold** (no payment proof): answered with the `402` challenge
 //! * **x402** (`PAYMENT-SIGNATURE`): run through the x402 verify/settle flow
-//! * **MPP** (`Authorization`): answered with the cold `402` until MPP
-//!   verification ships
+//! * **MPP** (`Authorization`): run through the MPP verify flow
 //! * **collision** (both rails at once): rejected with `400`
 
 use axum::{
@@ -28,8 +27,7 @@ pub(crate) enum Rail {
     None,
     /// An x402 attempt (`PAYMENT-SIGNATURE` present).
     X402,
-    /// An MPP attempt (`Authorization` present), answered with the cold `402`
-    /// until MPP verification ships.
+    /// An MPP attempt (`Authorization` present).
     Mpp,
     /// Both rails at once: a collision, rejected with `400`.
     Both,
@@ -70,6 +68,7 @@ fn collision_400() -> Response {
 #[derive(Clone)]
 pub(crate) struct Context {
     pub(crate) x402: x402::Client,
+    pub(crate) mpp: mpp::Client,
     /// Payer screener, shared by every rail. `None` when screening is not configured.
     pub(crate) screener: Option<RestrictedAddressScreener>,
 }
@@ -83,6 +82,7 @@ pub(crate) fn context(
 ) -> Result<Context, AppError> {
     Ok(Context {
         x402: x402::client(config)?,
+        mpp: mpp::client(config)?,
         screener,
     })
 }
@@ -95,9 +95,7 @@ pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Nex
         Rail::None => cold_402(&absolute_uri(&req)),
         Rail::Both => collision_400(),
         Rail::X402 => x402::handle(ctx.x402, ctx.screener, req, next).await,
-        // An MPP credential cannot be verified yet, so it pays for nothing:
-        // answer with the cold 402 rather than serve an unpaid search.
-        Rail::Mpp => cold_402(&absolute_uri(&req)),
+        Rail::Mpp => mpp::handle(ctx.mpp, req, next).await,
     }
 }
 
