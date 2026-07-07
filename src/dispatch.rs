@@ -48,14 +48,20 @@ fn classify(headers: &HeaderMap) -> Rail {
 ///
 /// * x402: the V2 payment requirements as the JSON body, echoing `resource`
 ///   (the requested endpoint) back to the client.
-/// * MPP: nothing — its `WWW-Authenticate` challenge returns here once the
-///   rail can verify what it advertises.
-fn cold_402(resource: &str) -> Response {
-    (
+/// * MPP: the `WWW-Authenticate: Payment` challenge header, minted fresh for
+///   each `402` (omitted if it cannot be built).
+fn cold_402(mpp: &mpp::Client, resource: &str) -> Response {
+    let mut response = (
         StatusCode::PAYMENT_REQUIRED,
         Json(x402::challenge(resource)),
     )
-        .into_response()
+        .into_response();
+    // A rail that cannot produce its challenge is left out, so the 402 still
+    // advertises whatever the other rail offers.
+    if let Some((name, value)) = mpp::challenge(mpp) {
+        response.headers_mut().insert(name, value);
+    }
+    response
 }
 
 /// Collision `400`: both rails presented at once. Reuses the `AppError` envelope.
@@ -92,7 +98,7 @@ pub(crate) fn context(
 /// never how a rail verifies.
 pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Next) -> Response {
     match classify(req.headers()) {
-        Rail::None => cold_402(&absolute_uri(&req)),
+        Rail::None => cold_402(&ctx.mpp, &absolute_uri(&req)),
         Rail::Both => collision_400(),
         Rail::X402 => x402::handle(ctx.x402, ctx.screener, req, next).await,
         Rail::Mpp => mpp::handle(ctx.mpp, req, next).await,
@@ -211,12 +217,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cold_402_advertises_only_the_x402_rail() {
-        let response = cold_402("https://bx402.example.com/res/v1/web/search");
+    async fn cold_402_advertises_both_rails() {
+        let config = Config {
+            brave_search_api_key: "key".to_string(),
+            brave_search_api_base_url: "http://upstream.invalid".to_string(),
+            x402_facilitator_url: "http://facilitator.invalid".to_string(),
+            mpp_rpc_url: "https://rpc.moderato.tempo.xyz".to_string(),
+            mpp_secret_key: "test-secret".to_string(),
+            restricted_address_s3_bucket: None,
+        };
+        let response = cold_402(
+            &mpp::client(&config).unwrap(),
+            "https://bx402.example.com/res/v1/web/search",
+        );
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
-        // MPP rail: no `WWW-Authenticate` challenge while the rail is paused.
-        assert!(response.headers().get(header::WWW_AUTHENTICATE).is_none());
+        // MPP rail: a `Payment` challenge in `WWW-Authenticate`.
+        let challenge = response
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .expect("the MPP challenge is advertised")
+            .to_str()
+            .unwrap();
+        assert!(challenge.starts_with("Payment "));
 
         // x402 rail: V2 payment requirements as a JSON body.
         let body = response.into_body().collect().await.unwrap().to_bytes();
