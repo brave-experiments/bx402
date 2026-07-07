@@ -148,12 +148,9 @@ mod tests {
 
     fn config_with(base_url: String, facilitator_url: String) -> Config {
         Config {
-            brave_search_api_key: "secret-key".to_string(),
             brave_search_api_base_url: base_url,
             x402_facilitator_url: facilitator_url,
-            mpp_rpc_url: "http://tempo.invalid".to_string(),
-            mpp_secret_key: "test-secret".to_string(),
-            restricted_address_s3_bucket: None,
+            ..Config::for_tests()
         }
     }
 
