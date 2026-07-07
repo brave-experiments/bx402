@@ -368,6 +368,103 @@ mod tests {
         }
     }
 
+    /// Drive `app()` with an MPP `Authorization` header through the paid route.
+    async fn get_mpp(
+        config: Config,
+        screener: Option<RestrictedAddressScreener>,
+        authorization: &str,
+    ) -> axum::response::Response {
+        let request = Request::builder()
+            .uri(format!("{WEB_SEARCH_PATH}?q=rust"))
+            .header("authorization", authorization)
+            .body(Body::empty())
+            .unwrap();
+        app(config, screener)
+            .unwrap()
+            .oneshot(request)
+            .await
+            .unwrap()
+    }
+
+    /// An upstream that must never be called, for tests asserting an MPP payment is
+    /// refused before the search runs.
+    async fn untouched_upstream() -> MockServer {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&upstream)
+            .await;
+        upstream
+    }
+
+    /// A config wired to an upstream that must never be called and an unreachable
+    /// Tempo RPC, so a refusal is proven to happen before either is touched. A
+    /// reached RPC surfaces as a 502; a reached upstream fails the mock's
+    /// expectation when the returned server drops.
+    async fn refusing_mpp_config() -> (Config, MockServer) {
+        let upstream = untouched_upstream().await;
+        let config = Config {
+            mpp_rpc_url: "http://127.0.0.1:1".to_string(),
+            ..test_config(upstream.uri())
+        };
+        (config, upstream)
+    }
+
+    #[tokio::test]
+    async fn mpp_hash_credential_is_refused_before_any_search() {
+        let (config, _upstream) = refusing_mpp_config().await;
+
+        // The credential answers our real challenge, but its payload says the client
+        // already broadcast the transfer itself, which this service does not accept.
+        let credential = crate::mpp::hash_credential_header(&config);
+        let response = get_mpp(config, None, &credential).await;
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        // The rail's own refusal, not the cold 402 a misrouted request would get.
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "error": "mpp payment did not verify" })
+        );
+    }
+
+    #[tokio::test]
+    async fn mpp_unreachable_tempo_rpc_is_a_gateway_error() {
+        let (config, _upstream) = refusing_mpp_config().await;
+
+        // The credential is well formed, so verification fails only at the transport
+        // layer: our failure rather than the client's, and never a free search.
+        let (credential, _signer) = crate::mpp::signed_transaction_credential_header(&config).await;
+        let response = get_mpp(config, None, &credential).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn mpp_blocked_signer_never_reaches_tempo_or_the_search() {
+        let (config, _upstream) = refusing_mpp_config().await;
+
+        // The restricted list holds exactly the address that signed the transaction.
+        let (credential, signer) = crate::mpp::signed_transaction_credential_header(&config).await;
+        let s3 = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path(format!(
+                "/restricted-address-bucket/{}",
+                screening_key(&signer)
+            )))
+            .respond_with(ResponseTemplate::new(200)) // key exists: on the list
+            .expect(1)
+            .mount(&s3)
+            .await;
+        let screener = crate::screener::test_screener(s3.uri(), "restricted-address-bucket");
+
+        let response = get_mpp(config, Some(screener), &credential).await;
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    }
+
     #[tokio::test]
     async fn cold_402_advertises_the_absolute_request_url_as_resource() {
         // End-to-end: a cold request through the real router must echo the endpoint

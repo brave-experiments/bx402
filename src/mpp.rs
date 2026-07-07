@@ -279,6 +279,79 @@ fn service_unavailable() -> Response {
         .into_response()
 }
 
+/// Mint the `Authorization` header value for a credential answering our own
+/// challenge with `payload`: the test-side counterpart of [`credential`], using
+/// the same client the app under test builds from `config`.
+#[cfg(test)]
+fn credential_header(config: &Config, payload: mpp::protocol::core::PaymentPayload) -> String {
+    let Client(handler) = client(config).expect("test config builds the mpp client");
+    let challenge = handler
+        .charge_challenge_with_options(&charge_request(&handler), None, None)
+        .expect("the challenge builds");
+    let credential = PaymentCredential::new(challenge.to_echo(), payload);
+    mpp::protocol::core::format_authorization(&credential).expect("the credential formats")
+}
+
+/// A credential whose payload says the client already broadcast the transfer.
+#[cfg(test)]
+pub(crate) fn hash_credential_header(config: &Config) -> String {
+    credential_header(
+        config,
+        mpp::protocol::core::PaymentPayload::hash("0xdeadbeef"),
+    )
+}
+
+/// A credential paying with the forged signed transaction. Returns the header and
+/// the signer's lowercase address, so a test can put that exact address on the
+/// restricted list.
+#[cfg(test)]
+pub(crate) async fn signed_transaction_credential_header(config: &Config) -> (String, String) {
+    let (tx, signer) = forged_transaction().await;
+    let header = credential_header(config, mpp::protocol::core::PaymentPayload::transaction(tx));
+    (header, signer)
+}
+
+/// A minimal signed Tempo transaction from a fixed test key, as
+/// `(transaction hex, signer address)`. The transfer is not a valid charge; it
+/// only has to decode and carry a real signature. Signing at test time keeps the
+/// bytes aligned with the current tempo-primitives encoding. The signer types
+/// come from mpp's re-exports rather than a new dependency.
+#[cfg(test)]
+async fn forged_transaction() -> (String, String) {
+    use alloy_primitives::{Address, B256, Signature, TxKind, U256, hex};
+    use mpp::{PrivateKeySigner, Signer};
+    use tempo_primitives::TempoTransaction;
+    use tempo_primitives::transaction::{Call, TempoSignature};
+
+    let signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x01))
+        .expect("the fixed test key is a valid secp256k1 scalar");
+    // Recipient, chain, and gas are arbitrary: the transfer never verifies.
+    let tx = TempoTransaction {
+        chain_id: 42431,
+        gas_limit: 100_000,
+        calls: vec![Call {
+            to: TxKind::Call(Address::repeat_byte(0x42)),
+            value: U256::ZERO,
+            input: Bytes::new(),
+        }],
+        ..Default::default()
+    };
+
+    // The signature hash covers only the transaction fields, so a placeholder
+    // signature is enough to compute it.
+    let placeholder = TempoSignature::from(Signature::new(U256::from(1), U256::from(1), false));
+    let sig_hash = AASigned::new_unhashed(tx.clone(), placeholder).signature_hash();
+    let signature = signer.sign_hash(&sig_hash).await.expect("signing succeeds");
+    let signed = AASigned::new_unhashed(tx, TempoSignature::from(signature));
+
+    let mut encoded = Vec::new();
+    signed.eip2718_encode(&mut encoded);
+    (
+        hex::encode_prefixed(encoded),
+        format!("{:#x}", signer.address()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +474,20 @@ mod tests {
         let parsed = Receipt::from_header(header).expect("the header parses back");
         assert!(parsed.is_success());
         assert_eq!(parsed.reference, "0xtxhash");
+    }
+
+    #[tokio::test]
+    async fn signer_recovery_matches_the_signing_key() {
+        use mpp::protocol::core::PaymentPayload;
+
+        // signer_address decodes the transaction independently of the SDK, so it
+        // must recover exactly the key that signed it.
+        let (tx, signer) = forged_transaction().await;
+        let credential = PaymentCredential::new(echo(), PaymentPayload::transaction(tx));
+        assert_eq!(
+            signer_address(&credential).as_deref(),
+            Some(signer.as_str())
+        );
     }
 
     #[test]
