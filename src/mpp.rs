@@ -131,8 +131,11 @@ pub(crate) async fn handle(
     }
 
     // Screen the transfer's signer before verification, so a blocked payer's
-    // transaction is never broadcast and no funds move.
-    if let Some(denied) = screen_signer(screener.as_ref(), signer_address(&credential)).await {
+    // transaction is never broadcast and no funds move. Without a screener there
+    // is nothing to consult, and the signer is not recovered at all.
+    if let Some(screener) = &screener
+        && let Some(denied) = screen_signer(screener, signer_address(&credential)).await
+    {
         return denied;
     }
 
@@ -192,14 +195,13 @@ fn charge_request(handler: &Handler) -> ChargeRequest {
 
 /// Screen the transaction's signer; returns the refusal to send, or `None` to proceed:
 ///
-/// - allowed, or no screener configured: `None`
+/// - allowed: `None`
 /// - blocked, or no signer to screen: generic `402`
 /// - could not screen (error or timeout): `503`
 async fn screen_signer(
-    screener: Option<&RestrictedAddressScreener>,
+    screener: &RestrictedAddressScreener,
     signer: Option<String>,
 ) -> Option<Response> {
-    let screener = screener?;
     let Some(signer) = signer else {
         return Some(payment_rejected());
     };
@@ -548,7 +550,7 @@ mod tests {
                 .await;
             let screener = crate::screener::test_screener(server.uri(), "restricted");
 
-            let refusal = screen_signer(Some(&screener), Some("0xsigner".to_string())).await;
+            let refusal = screen_signer(&screener, Some("0xsigner".to_string())).await;
             assert_eq!(
                 refusal.map(|response| response.status()),
                 expected,
@@ -563,14 +565,11 @@ mod tests {
         // refused without consulting anything (the endpoint is unreachable).
         let screener =
             crate::screener::test_screener("http://127.0.0.1:1".to_string(), "restricted");
-        let refusal = screen_signer(Some(&screener), None).await;
+        let refusal = screen_signer(&screener, None).await;
         assert_eq!(
             refusal.map(|response| response.status()),
             Some(StatusCode::PAYMENT_REQUIRED)
         );
-
-        // Without a screener there is nothing to consult and the flow proceeds.
-        assert!(screen_signer(None, None).await.is_none());
     }
 
     #[test]
