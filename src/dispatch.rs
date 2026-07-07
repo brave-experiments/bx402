@@ -219,12 +219,8 @@ mod tests {
     #[tokio::test]
     async fn cold_402_advertises_both_rails() {
         let config = Config {
-            brave_search_api_key: "key".to_string(),
-            brave_search_api_base_url: "http://upstream.invalid".to_string(),
-            x402_facilitator_url: "http://facilitator.invalid".to_string(),
             mpp_rpc_url: "https://rpc.moderato.tempo.xyz".to_string(),
-            mpp_secret_key: "test-secret".to_string(),
-            restricted_address_s3_bucket: None,
+            ..Config::for_tests()
         };
         let response = cold_402(
             &mpp::client(&config).unwrap(),

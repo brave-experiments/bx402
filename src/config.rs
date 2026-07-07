@@ -62,6 +62,22 @@ impl Config {
     }
 }
 
+#[cfg(test)]
+impl Config {
+    /// A config whose every endpoint is parseable but unreachable, shared by the
+    /// test modules across the crate; each test overrides the fields it exercises.
+    pub(crate) fn for_tests() -> Self {
+        Self {
+            brave_search_api_key: "secret-key".to_string(),
+            brave_search_api_base_url: "http://upstream.invalid".to_string(),
+            x402_facilitator_url: "http://facilitator.invalid".to_string(),
+            mpp_rpc_url: "http://tempo.invalid".to_string(),
+            mpp_secret_key: "test-secret".to_string(),
+            restricted_address_s3_bucket: None,
+        }
+    }
+}
+
 /// Read a required environment variable, distinguishing the two ways it can fail:
 /// absent is [`AppError::MissingConfig`], present but non-Unicode is
 /// [`AppError::InvalidConfig`].
