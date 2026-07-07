@@ -16,9 +16,12 @@ use axum::{
 };
 use serde_json::json;
 
+use alloy_primitives::Bytes;
 use mpp::protocol::core::{PaymentCredential, Receipt};
 use mpp::protocol::intents::ChargeRequest;
+use mpp::protocol::methods::tempo::TEMPO_TX_TYPE_ID;
 use mpp::server::{ErrorCode, Mpp, TempoChargeMethod, TempoConfig, TempoProvider, tempo};
+use tempo_primitives::transaction::AASigned;
 
 use crate::{AppError, Config};
 
@@ -167,6 +170,24 @@ fn charge_request(handler: &Handler) -> ChargeRequest {
         method_details: handler.chain_id().map(|id| json!({ "chainId": id })),
         ..Default::default()
     }
+}
+
+/// The payer, recovered from the signed transaction's own signature: the address
+/// the transfer draws from, independent of anything the credential envelope
+/// claims. Lowercase 0x hex, the screener's canonical form for EVM addresses.
+/// `None` when the payload is not a decodable signed Tempo transaction, which
+/// verification would refuse anyway.
+#[allow(dead_code, reason = "screening does not gate the pay flow")]
+fn signer_address(credential: &PaymentCredential) -> Option<String> {
+    let payload = credential.charge_payload().ok()?;
+    let bytes = payload.signed_tx()?.parse::<Bytes>().ok()?;
+    let tx_data = bytes.strip_prefix(&[TEMPO_TX_TYPE_ID]).unwrap_or(&bytes);
+    let signed = AASigned::rlp_decode(&mut &tx_data[..]).ok()?;
+    let signer = signed
+        .signature()
+        .recover_signer(&signed.signature_hash())
+        .ok()?;
+    Some(format!("{signer:#x}"))
 }
 
 /// Returns `true` when the credential pays with a signed transaction that this
@@ -327,6 +348,38 @@ mod tests {
         let parsed = Receipt::from_header(header).expect("the header parses back");
         assert!(parsed.is_success());
         assert_eq!(parsed.reference, "0xtxhash");
+    }
+
+    /// Signer recovery decodes with `tempo-primitives` directly, and is only
+    /// faithful while that is the same version the mpp SDK verifies with. Cargo
+    /// would happily resolve two versions side by side after a major bump of the
+    /// SDK's copy, forking the two decoders silently; this fails the build's tests
+    /// instead.
+    #[test]
+    fn the_lockfile_carries_one_tempo_primitives() {
+        let lock = include_str!("../Cargo.lock");
+        let versions = lock.matches("name = \"tempo-primitives\"").count();
+        assert_eq!(
+            versions, 1,
+            "two tempo-primitives versions resolved: signer recovery and SDK verification \
+             would decode transactions with different codecs"
+        );
+    }
+
+    #[test]
+    fn signer_recovery_requires_a_decodable_signed_transaction() {
+        use mpp::protocol::core::PaymentPayload;
+
+        let cases = [
+            ("garbage hex", json!(PaymentPayload::transaction("0xno"))),
+            ("not hex at all", json!(PaymentPayload::transaction("zzz"))),
+            ("empty", json!(PaymentPayload::transaction(""))),
+            ("hash payload", json!(PaymentPayload::hash("0xdeadbeef"))),
+        ];
+        for (name, payload) in cases {
+            let credential = PaymentCredential::new(echo(), payload);
+            assert!(signer_address(&credential).is_none(), "case: {name}");
+        }
     }
 
     #[test]
