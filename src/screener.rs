@@ -200,10 +200,33 @@ fn test_client(endpoint: String) -> aws_sdk_s3::Client {
     aws_sdk_s3::Client::from_conf(config)
 }
 
+/// Shared so tests can build the exact request path a lookup will hit.
+#[cfg(test)]
+pub(crate) const TEST_BUCKET: &str = "restricted-address-bucket";
+
 /// Build a screener pointed at a wiremock S3, for tests in other modules of the crate.
 #[cfg(test)]
-pub(crate) fn test_screener(endpoint: String, bucket: &str) -> RestrictedAddressScreener {
-    RestrictedAddressScreener::new(test_client(endpoint), bucket.to_string())
+pub(crate) fn test_screener(endpoint: String) -> RestrictedAddressScreener {
+    RestrictedAddressScreener::new(test_client(endpoint), TEST_BUCKET.to_string())
+}
+
+/// A screener against a mock S3 that answers every `HEAD` with `status`, for
+/// tests across the crate. The server is returned too and must stay alive. The
+/// mock shuts down when it goes out of scope.
+#[cfg(test)]
+pub(crate) async fn test_screener_answering(
+    status: u16,
+) -> (wiremock::MockServer, RestrictedAddressScreener) {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .respond_with(ResponseTemplate::new(status))
+        .mount(&server)
+        .await;
+    let screener = test_screener(server.uri());
+    (server, screener)
 }
 
 #[cfg(test)]
@@ -212,18 +235,10 @@ mod tests {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn screener_for(endpoint: String) -> RestrictedAddressScreener {
-        test_screener(endpoint, "restricted-address-bucket")
-    }
-
     /// Screen `"0xanything"` against a mock S3 that answers every `HEAD` with `status`.
     async fn screen_against(status: u16) -> Result<Screening, ScreenError> {
-        let server = MockServer::start().await;
-        Mock::given(method("HEAD"))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        screener_for(server.uri()).screen("0xanything").await
+        let (_server, screener) = test_screener_answering(status).await;
+        screener.screen("0xanything").await
     }
 
     #[tokio::test]
@@ -250,7 +265,7 @@ mod tests {
         // Only the exact stored key exists; every other key 404s.
         Mock::given(method("HEAD"))
             .and(wiremock::matchers::path(format!(
-                "/restricted-address-bucket/{stored_key}"
+                "/{TEST_BUCKET}/{stored_key}"
             )))
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
@@ -260,7 +275,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let screener = screener_for(server.uri());
+        let screener = test_screener(server.uri());
         assert_eq!(
             screener.screen(stored).await.unwrap(),
             Screening::Blocked,
@@ -285,7 +300,7 @@ mod tests {
     async fn unreachable_s3_denies() {
         // Nothing listens on port 1: the request fails at the transport layer, which is
         // not a definite NotFound, so the screener denies.
-        let screener = screener_for("http://127.0.0.1:1".to_string());
+        let screener = test_screener("http://127.0.0.1:1".to_string());
         assert!(screener.screen("0xanything").await.is_err());
     }
 
@@ -304,7 +319,7 @@ mod tests {
         // reachable. The 500 catch-all makes the test pass only if that exact key was hit.
         Mock::given(method("HEAD"))
             .and(wiremock::matchers::path(format!(
-                "/restricted-address-bucket/{CANARY_KEY}"
+                "/{TEST_BUCKET}/{CANARY_KEY}"
             )))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
@@ -314,12 +329,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let (_screener, status) = init_with(
-            test_client(server.uri()),
-            "restricted-address-bucket".to_string(),
-        )
-        .await
-        .unwrap();
+        let (_screener, status) = init_with(test_client(server.uri()), TEST_BUCKET.to_string())
+            .await
+            .unwrap();
         assert!(matches!(status, Status::Enabled { .. }));
     }
 
@@ -330,11 +342,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(status))
             .mount(&server)
             .await;
-        init_with(
-            test_client(server.uri()),
-            "restricted-address-bucket".to_string(),
-        )
-        .await
+        init_with(test_client(server.uri()), TEST_BUCKET.to_string()).await
     }
 
     #[tokio::test]
