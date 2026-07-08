@@ -16,7 +16,7 @@ use axum::{
 use serde_json::json;
 
 use alloy_primitives::Bytes;
-use mpp::protocol::core::{PaymentCredential, Receipt};
+use mpp::protocol::core::{PaymentCredential, PaymentPayload, Receipt};
 use mpp::protocol::intents::ChargeRequest;
 use mpp::protocol::methods::tempo::TEMPO_TX_TYPE_ID;
 use mpp::server::{ErrorCode, Mpp, TempoChargeMethod, TempoConfig, TempoProvider, tempo};
@@ -58,29 +58,33 @@ pub(crate) fn has_credential(headers: &HeaderMap) -> bool {
 /// request because every challenge is HMAC-signed and expires. `None` if the
 /// challenge cannot be built or encoded, leaving the `402` advertising x402 alone.
 pub(crate) fn challenge(client: &Client) -> Option<(HeaderName, HeaderValue)> {
-    let Client(handler) = client;
-    match handler
-        .charge_challenge_with_options(&charge_request(handler), None, None)
+    let value = client
+        .handler
+        .charge_challenge_with_options(&client.charge, None, None)
         .and_then(|challenge| challenge.to_header())
         .ok()
-        .and_then(|value| HeaderValue::from_str(&value).ok())
-    {
-        Some(value) => Some((header::WWW_AUTHENTICATE, value)),
-        None => {
-            tracing::error!("mpp challenge could not be built");
-            None
-        }
-    }
+        .and_then(|value| HeaderValue::from_str(&value).ok());
+    let Some(value) = value else {
+        tracing::error!("mpp challenge could not be built");
+        return None;
+    };
+    Some((header::WWW_AUTHENTICATE, value))
 }
 
-/// The MPP payment handler, newtyped so the rest of the crate names this module's
-/// type, not the SDK's, and `dispatch` can carry it as plain axum state.
+/// The MPP payment handler and the charge it collects. A wrapper, so the rest
+/// of the crate names this module's type rather than the SDK's, and `dispatch`
+/// can carry it as plain axum state.
 #[derive(Clone)]
-pub(crate) struct Client(Handler);
+pub(crate) struct Client {
+    handler: Handler,
+    /// Built once at startup. Challenges advertise this exact value and
+    /// credentials are verified against it, so the two can never disagree.
+    charge: ChargeRequest,
+}
 
-/// Build the MPP handler from config. A bad `MPP_RPC_URL` or unusable
-/// `MPP_SECRET_KEY` is a startup misconfiguration, surfaced as [`AppError`]. The
-/// Tempo chain and challenge currency both follow from the RPC URL.
+/// A bad `MPP_RPC_URL` or unusable `MPP_SECRET_KEY` is a startup
+/// misconfiguration, surfaced as [`AppError`]. The Tempo chain and challenge
+/// currency both follow from the RPC URL.
 pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
     let builder = tempo(TempoConfig {
         recipient: PAY_TO_EVM,
@@ -88,9 +92,19 @@ pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
     .rpc_url(&config.mpp_rpc_url)
     .realm(REALM)
     .secret_key(&config.mpp_secret_key);
-    Handler::create(builder)
-        .map(Client)
-        .map_err(|err| AppError::InvalidConfig(format!("MPP: {err}")))
+    let handler =
+        Handler::create(builder).map_err(|err| AppError::InvalidConfig(format!("MPP: {err}")))?;
+    let currency = handler
+        .currency()
+        .ok_or_else(|| AppError::InvalidConfig("MPP: no currency bound to the handler".into()))?;
+    let charge = ChargeRequest {
+        amount: PRICE_USD_BASE_UNITS.to_string(),
+        currency: currency.to_string(),
+        recipient: handler.recipient().map(str::to_string),
+        method_details: handler.chain_id().map(|id| json!({ "chainId": id })),
+        ..Default::default()
+    };
+    Ok(Client { handler, charge })
 }
 
 /// Drive the MPP pay flow for a request that carries a credential.
@@ -108,10 +122,10 @@ pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
 ///
 /// A credential only verifies against a challenge this service issued: the SDK
 /// recomputes the challenge id (an HMAC under our secret key) and checks the
-/// echoed charge against [`charge_request`], so a credential minted for another
+/// echoed charge against [`Client::charge`], so a credential minted for another
 /// amount, currency, or recipient is refused.
 pub(crate) async fn handle(
-    Client(handler): Client,
+    client: Client,
     screener: Option<RestrictedAddressScreener>,
     req: Request,
     next: Next,
@@ -120,23 +134,24 @@ pub(crate) async fn handle(
         return payment_rejected();
     };
 
-    if !pays_by_transaction(&credential) {
+    let Some(payload) = transaction_payload(&credential) else {
         return payment_rejected();
-    }
+    };
 
     // Screen the transfer's signer before verification, so a blocked payer's
     // transaction is never broadcast and no funds move. Without a screener there
     // is nothing to consult, and the signer is not recovered at all.
     if let Some(screener) = &screener
-        && let Some(denied) = screen_signer(screener, signer_address(&credential)).await
+        && let Some(denied) = screen_signer(screener, signer_address(&payload)).await
     {
         return denied;
     }
 
     // A Tempo RPC we cannot reach is our failure, not the client's, so it is a 502
     // rather than a 402.
-    let receipt = match handler
-        .verify_credential_with_expected_request(&credential, &charge_request(&handler))
+    let receipt = match client
+        .handler
+        .verify_credential_with_expected_request(&credential, &client.charge)
         .await
     {
         Ok(receipt) => receipt,
@@ -159,32 +174,14 @@ fn attach_receipt(mut response: Response, receipt: &Receipt) -> Response {
         .to_header()
         .ok()
         .and_then(|value| HeaderValue::from_str(&value).ok());
-    match value {
-        Some(value) => {
-            response
-                .headers_mut()
-                .insert(HeaderName::from_static(PAYMENT_RECEIPT_HEADER), value);
-        }
-        None => tracing::error!("mpp settlement receipt could not be encoded as a header"),
-    }
+    let Some(value) = value else {
+        tracing::error!("mpp settlement receipt could not be encoded as a header");
+        return response;
+    };
     response
-}
-
-/// The charge every request must pay: our flat price to our treasury, in the
-/// handler's bound currency on its bound chain. The same value seeds the
-/// advertised challenge and the expectation a credential is verified against, so
-/// there is one source of truth for what we charge.
-fn charge_request(handler: &Handler) -> ChargeRequest {
-    ChargeRequest {
-        amount: PRICE_USD_BASE_UNITS.to_string(),
-        currency: handler
-            .currency()
-            .expect("currency is bound by Mpp::create")
-            .to_string(),
-        recipient: handler.recipient().map(str::to_string),
-        method_details: handler.chain_id().map(|id| json!({ "chainId": id })),
-        ..Default::default()
-    }
+        .headers_mut()
+        .insert(HeaderName::from_static(PAYMENT_RECEIPT_HEADER), value);
+    response
 }
 
 /// Screen the transaction's signer; returns the refusal to send, or `None` to proceed:
@@ -212,10 +209,9 @@ async fn screen_signer(
 /// The payer, recovered from the signed transaction's own signature: the address
 /// the transfer draws from, independent of anything the credential envelope
 /// claims. Lowercase 0x hex, the screener's canonical form for EVM addresses.
-/// `None` when the payload is not a decodable signed Tempo transaction, which
-/// verification would refuse anyway.
-fn signer_address(credential: &PaymentCredential) -> Option<String> {
-    let payload = credential.charge_payload().ok()?;
+/// `None` when the payload does not carry a decodable signed Tempo transaction,
+/// which verification would refuse anyway.
+fn signer_address(payload: &PaymentPayload) -> Option<String> {
     let bytes = payload.signed_tx()?.parse::<Bytes>().ok()?;
     let tx_data = bytes.strip_prefix(&[TEMPO_TX_TYPE_ID]).unwrap_or(&bytes);
     let signed = AASigned::rlp_decode(&mut &tx_data[..]).ok()?;
@@ -226,14 +222,13 @@ fn signer_address(credential: &PaymentCredential) -> Option<String> {
     Some(format!("{signer:#x}"))
 }
 
-/// Returns `true` when the credential pays with a signed transaction that this
+/// The credential's payload, if it pays with a signed transaction that this
 /// service broadcasts during verification. A hash credential says the client
 /// already broadcast the transfer itself, settling before anything was checked,
 /// so it does not pay here.
-fn pays_by_transaction(credential: &PaymentCredential) -> bool {
-    credential
-        .charge_payload()
-        .is_ok_and(|payload| payload.is_transaction())
+fn transaction_payload(credential: &PaymentCredential) -> Option<PaymentPayload> {
+    let payload = credential.charge_payload().ok()?;
+    payload.is_transaction().then_some(payload)
 }
 
 /// Parse the MPP credential from the `Authorization` header. Returns `None` if the
@@ -258,10 +253,11 @@ fn gateway_error() -> Response {
 /// challenge with `payload`: the test-side counterpart of [`credential`], using
 /// the same client the app under test builds from `config`.
 #[cfg(test)]
-fn credential_header(config: &Config, payload: mpp::protocol::core::PaymentPayload) -> String {
-    let Client(handler) = client(config).expect("test config builds the mpp client");
-    let challenge = handler
-        .charge_challenge_with_options(&charge_request(&handler), None, None)
+fn credential_header(config: &Config, payload: PaymentPayload) -> String {
+    let client = client(config).expect("test config builds the mpp client");
+    let challenge = client
+        .handler
+        .charge_challenge_with_options(&client.charge, None, None)
         .expect("the challenge builds");
     let credential = PaymentCredential::new(challenge.to_echo(), payload);
     mpp::protocol::core::format_authorization(&credential).expect("the credential formats")
@@ -270,10 +266,7 @@ fn credential_header(config: &Config, payload: mpp::protocol::core::PaymentPaylo
 /// A credential whose payload says the client already broadcast the transfer.
 #[cfg(test)]
 pub(crate) fn hash_credential_header(config: &Config) -> String {
-    credential_header(
-        config,
-        mpp::protocol::core::PaymentPayload::hash("0xdeadbeef"),
-    )
+    credential_header(config, PaymentPayload::hash("0xdeadbeef"))
 }
 
 /// A credential paying with the forged signed transaction. Returns the header and
@@ -282,7 +275,7 @@ pub(crate) fn hash_credential_header(config: &Config) -> String {
 #[cfg(test)]
 pub(crate) async fn signed_transaction_credential_header(config: &Config) -> (String, String) {
     let (tx, signer) = forged_transaction().await;
-    let header = credential_header(config, mpp::protocol::core::PaymentPayload::transaction(tx));
+    let header = credential_header(config, PaymentPayload::transaction(tx));
     (header, signer)
 }
 
@@ -341,8 +334,10 @@ mod tests {
 
     #[test]
     fn client_rejects_an_unparseable_rpc_url() {
-        let err = client(&test_config("not a url")).map(|_| ()).unwrap_err();
-        assert!(matches!(err, AppError::InvalidConfig(_)));
+        assert!(matches!(
+            client(&test_config("not a url")),
+            Err(AppError::InvalidConfig(_))
+        ));
     }
 
     /// A minimal challenge echo; the payload gate reads only the payload beside it.
@@ -361,8 +356,6 @@ mod tests {
 
     #[test]
     fn only_a_signed_transaction_payload_pays() {
-        use mpp::protocol::core::PaymentPayload;
-
         let cases = [
             (
                 "transaction",
@@ -375,7 +368,11 @@ mod tests {
         ];
         for (name, payload, expected) in cases {
             let credential = PaymentCredential::new(echo(), payload);
-            assert_eq!(pays_by_transaction(&credential), expected, "case: {name}");
+            assert_eq!(
+                transaction_payload(&credential).is_some(),
+                expected,
+                "case: {name}"
+            );
         }
     }
 
@@ -392,8 +389,7 @@ mod tests {
         assert!(!parsed.id.is_empty());
         assert!(parsed.expires.is_some());
 
-        let Client(handler) = &client;
-        let expected = charge_request(handler);
+        let expected = &client.charge;
         let advertised: ChargeRequest = parsed.request.decode().unwrap();
         assert_eq!(advertised.amount, expected.amount);
         assert_eq!(advertised.currency, expected.currency);
@@ -402,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn charge_request_follows_the_network_and_pins_the_price() {
+    fn the_charge_follows_the_network_and_pins_the_price() {
         // The SDK's default currency per network: pathUSD (the TIP-20 precompile) on
         // the Moderato testnet, USDC on Tempo mainnet.
         let cases = [
@@ -418,8 +414,7 @@ mod tests {
             ),
         ];
         for (rpc_url, currency, chain_id) in cases {
-            let Client(handler) = client(&test_config(rpc_url)).unwrap();
-            let request = charge_request(&handler);
+            let request = client(&test_config(rpc_url)).unwrap().charge;
 
             assert_eq!(
                 request.amount,
@@ -454,31 +449,25 @@ mod tests {
 
     #[tokio::test]
     async fn signer_recovery_matches_the_signing_key() {
-        use mpp::protocol::core::PaymentPayload;
-
         // signer_address decodes the transaction independently of the SDK, so it
         // must recover exactly the key that signed it.
         let (tx, signer) = forged_transaction().await;
-        let credential = PaymentCredential::new(echo(), PaymentPayload::transaction(tx));
         assert_eq!(
-            signer_address(&credential).as_deref(),
+            signer_address(&PaymentPayload::transaction(tx)).as_deref(),
             Some(signer.as_str())
         );
     }
 
     #[test]
     fn signer_recovery_requires_a_decodable_signed_transaction() {
-        use mpp::protocol::core::PaymentPayload;
-
         let cases = [
-            ("garbage hex", json!(PaymentPayload::transaction("0xno"))),
-            ("not hex at all", json!(PaymentPayload::transaction("zzz"))),
-            ("empty", json!(PaymentPayload::transaction(""))),
-            ("hash payload", json!(PaymentPayload::hash("0xdeadbeef"))),
+            ("garbage hex", PaymentPayload::transaction("0xno")),
+            ("not hex at all", PaymentPayload::transaction("zzz")),
+            ("empty", PaymentPayload::transaction("")),
+            ("hash payload", PaymentPayload::hash("0xdeadbeef")),
         ];
         for (name, payload) in cases {
-            let credential = PaymentCredential::new(echo(), payload);
-            assert!(signer_address(&credential).is_none(), "case: {name}");
+            assert!(signer_address(&payload).is_none(), "case: {name}");
         }
     }
 
