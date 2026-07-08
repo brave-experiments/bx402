@@ -383,11 +383,12 @@ mod tests {
             .unwrap()
     }
 
-    /// An upstream that must never be called, for tests asserting an MPP payment is
-    /// refused before the search runs.
+    /// An upstream that must never be called, for tests asserting a payment is
+    /// refused before the search runs; the expectation is verified when it drops.
     async fn untouched_upstream() -> MockServer {
         let upstream = MockServer::start().await;
         Mock::given(method("GET"))
+            .and(path(WEB_SEARCH_PATH))
             .respond_with(ResponseTemplate::new(200))
             .expect(0)
             .mount(&upstream)
@@ -436,17 +437,7 @@ mod tests {
 
         // The restricted list holds exactly the address that signed the transaction.
         let (credential, signer) = crate::mpp::signed_transaction_credential_header(&config).await;
-        let s3 = MockServer::start().await;
-        Mock::given(method("HEAD"))
-            .and(path(format!(
-                "/restricted-address-bucket/{}",
-                screening_key(&signer)
-            )))
-            .respond_with(ResponseTemplate::new(200)) // key exists: on the list
-            .expect(1)
-            .mount(&s3)
-            .await;
-        let screener = crate::screener::test_screener(s3.uri(), "restricted-address-bucket");
+        let (_s3, screener) = screener_blocking(&signer).await;
 
         let response = get_mpp(config, Some(screener), &credential).await;
 
@@ -527,14 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_payment_returns_402_and_never_calls_upstream() {
-        let upstream = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/res/v1/web/search"))
-            .respond_with(ResponseTemplate::new(200))
-            .expect(0) // a rejected payment must not reach the search; verified on drop
-            .mount(&upstream)
-            .await;
-
+        let upstream = untouched_upstream().await;
         let facilitator = mock_facilitator(false, true).await;
         let response = app(config_with(upstream.uri(), facilitator.uri()), None)
             .unwrap()
@@ -589,40 +573,43 @@ mod tests {
     }
 
     /// The S3 key the screener looks up for `address`: `base64url(lowercase(address))`,
-    /// matching how the screener encodes and the x402 rail canonicalizes.
+    /// matching how the screener encodes and the rails canonicalize.
     fn screening_key(address: &str) -> String {
         use base64::Engine;
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(address.to_ascii_lowercase())
     }
 
-    #[tokio::test]
-    async fn blocked_signer_is_refused_before_any_call() {
-        // Wire form is checksummed; the rail lowercases, so the stored key is lowercase.
-        let from = "0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B";
+    /// A screener whose restricted list holds exactly `address`: its screening key
+    /// 200s and must be looked up exactly once, every other key 404s. The mock S3
+    /// rides along so it stays alive and verifies the lookup when it drops.
+    async fn screener_blocking(address: &str) -> (MockServer, RestrictedAddressScreener) {
         let s3 = MockServer::start().await;
         Mock::given(method("HEAD"))
             .and(path(format!(
                 "/restricted-address-bucket/{}",
-                screening_key(from)
+                screening_key(address)
             )))
             .respond_with(ResponseTemplate::new(200)) // key exists: on the list
+            .expect(1)
             .mount(&s3)
             .await;
         Mock::given(method("HEAD"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&s3)
             .await;
+        let screener = crate::screener::test_screener(s3.uri(), "restricted-address-bucket");
+        (s3, screener)
+    }
+
+    #[tokio::test]
+    async fn blocked_signer_is_refused_before_any_call() {
+        // Wire form is checksummed; the rail lowercases, so the stored key is lowercase.
+        let from = "0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B";
+        let (_s3, screener) = screener_blocking(from).await;
 
         // The search must never run for a blocked signer.
-        let upstream = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path(WEB_SEARCH_PATH))
-            .respond_with(ResponseTemplate::new(200))
-            .expect(0)
-            .mount(&upstream)
-            .await;
+        let upstream = untouched_upstream().await;
 
-        let screener = crate::screener::test_screener(s3.uri(), "restricted-address-bucket");
         // Facilitator is unreachable: a blocked signer must not reach it either.
         let response = app(test_config(upstream.uri()), Some(screener))
             .unwrap()
@@ -673,21 +660,9 @@ mod tests {
     #[tokio::test]
     async fn unscreenable_signer_returns_503() {
         // The bucket errors, so the payer cannot be screened: deny, do not serve.
-        let s3 = MockServer::start().await;
-        Mock::given(method("HEAD"))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&s3)
-            .await;
+        let (_s3, screener) = crate::screener::test_screener_answering(500).await;
+        let upstream = untouched_upstream().await;
 
-        let upstream = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path(WEB_SEARCH_PATH))
-            .respond_with(ResponseTemplate::new(200))
-            .expect(0)
-            .mount(&upstream)
-            .await;
-
-        let screener = crate::screener::test_screener(s3.uri(), "restricted-address-bucket");
         let response = app(test_config(upstream.uri()), Some(screener))
             .unwrap()
             .oneshot(paid_request_from(

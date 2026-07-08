@@ -494,9 +494,6 @@ mod tests {
 
     #[tokio::test]
     async fn screening_outcomes_map_to_responses() {
-        use wiremock::matchers::method;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
         // The screener HEADs the S3 bucket: 200 is a list hit, 404 a miss, anything
         // else means the list could not be consulted.
         let cases = [
@@ -505,12 +502,7 @@ mod tests {
             (500, Some(StatusCode::SERVICE_UNAVAILABLE)),
         ];
         for (s3_status, expected) in cases {
-            let server = MockServer::start().await;
-            Mock::given(method("HEAD"))
-                .respond_with(ResponseTemplate::new(s3_status))
-                .mount(&server)
-                .await;
-            let screener = crate::screener::test_screener(server.uri(), "restricted");
+            let (_server, screener) = crate::screener::test_screener_answering(s3_status).await;
 
             let refusal = screen_signer(&screener, Some("0xsigner".to_string())).await;
             assert_eq!(

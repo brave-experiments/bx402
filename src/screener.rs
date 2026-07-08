@@ -204,6 +204,24 @@ pub(crate) fn test_screener(endpoint: String, bucket: &str) -> RestrictedAddress
     RestrictedAddressScreener::new(test_client(endpoint), bucket.to_string())
 }
 
+/// A screener against a mock S3 that answers every `HEAD` with `status`, plus the
+/// server keeping it alive, for tests across the crate.
+#[cfg(test)]
+pub(crate) async fn test_screener_answering(
+    status: u16,
+) -> (wiremock::MockServer, RestrictedAddressScreener) {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .respond_with(ResponseTemplate::new(status))
+        .mount(&server)
+        .await;
+    let screener = test_screener(server.uri(), "restricted-address-bucket");
+    (server, screener)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,12 +234,8 @@ mod tests {
 
     /// Screen `"0xanything"` against a mock S3 that answers every `HEAD` with `status`.
     async fn screen_against(status: u16) -> Result<Screening, ScreenError> {
-        let server = MockServer::start().await;
-        Mock::given(method("HEAD"))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        screener_for(server.uri()).screen("0xanything").await
+        let (_server, screener) = test_screener_answering(status).await;
+        screener.screen("0xanything").await
     }
 
     #[tokio::test]
