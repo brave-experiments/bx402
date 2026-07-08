@@ -8,11 +8,10 @@
 //! verifies a credential and settles it on Tempo in the same call.
 
 use axum::{
-    Json,
     extract::Request,
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use serde_json::json;
 
@@ -23,6 +22,7 @@ use mpp::protocol::intents::ChargeRequest;
 use mpp::server::{ErrorCode, Mpp, TempoChargeMethod, TempoConfig, TempoProvider, tempo};
 use tempo_primitives::transaction::{AASigned, TEMPO_TX_TYPE_ID};
 
+use crate::error::{json_error, service_unavailable};
 use crate::screener::{RestrictedAddressScreener, Screening};
 use crate::{AppError, Config};
 
@@ -142,7 +142,7 @@ pub(crate) async fn handle(
         Ok(receipt) => receipt,
         Err(err) if err.code == Some(ErrorCode::NetworkError) => {
             tracing::error!(error = ?err, "mpp verify failed: tempo rpc unreachable");
-            return gateway_error("payment network unavailable");
+            return gateway_error();
         }
         Err(_) => return payment_rejected(),
     };
@@ -243,25 +243,12 @@ fn credential(headers: &HeaderMap) -> Option<PaymentCredential> {
 /// A `402` refusing the payment. Every refusal carries the same message, so a
 /// missing, malformed, non-transaction, and rejected credential all read alike.
 fn payment_rejected() -> Response {
-    (
-        StatusCode::PAYMENT_REQUIRED,
-        Json(json!({ "error": "mpp payment did not verify" })),
-    )
-        .into_response()
+    json_error(StatusCode::PAYMENT_REQUIRED, "mpp payment did not verify")
 }
 
 /// A `502` for a payment we could not verify because Tempo was unreachable.
-fn gateway_error(detail: &str) -> Response {
-    (StatusCode::BAD_GATEWAY, Json(json!({ "error": detail }))).into_response()
-}
-
-/// A generic `503` for when the signer could not be screened (error or timeout).
-fn service_unavailable() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({ "error": "service temporarily unavailable" })),
-    )
-        .into_response()
+fn gateway_error() -> Response {
+    json_error(StatusCode::BAD_GATEWAY, "payment network unavailable")
 }
 
 /// Mint the `Authorization` header value for a credential answering our own
@@ -349,6 +336,7 @@ async fn forged_transaction() -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
 
     fn test_config(rpc_url: &str) -> Config {
         Config {

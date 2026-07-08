@@ -4,16 +4,16 @@
 //! classifies each request and delegates to whichever rail it is paying on.
 
 use axum::{
-    Json,
     extract::Request,
     http::{HeaderMap, HeaderValue, StatusCode, Uri, header::HeaderName},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 
 use serde_json::{Value, json};
 use x402_axum::facilitator_client::FacilitatorClient;
 
+use crate::error::{json_error, service_unavailable};
 use crate::screener::{RestrictedAddressScreener, Screening};
 use crate::{AppError, Config};
 use x402_chain_eip155::{KnownNetworkEip155, V2Eip155Exact, chain::ChecksummedAddress};
@@ -254,25 +254,12 @@ fn attach_receipt(mut response: Response, receipt: &proto::SettleResponse) -> Re
 
 /// A `402` telling the client their x402 payment was missing, malformed, or rejected.
 fn payment_rejected(detail: &str) -> Response {
-    (
-        StatusCode::PAYMENT_REQUIRED,
-        Json(json!({ "error": detail })),
-    )
-        .into_response()
+    json_error(StatusCode::PAYMENT_REQUIRED, detail)
 }
 
 /// A `502` for a payment we could neither verify nor settle through the facilitator.
 fn gateway_error(detail: &str) -> Response {
-    (StatusCode::BAD_GATEWAY, Json(json!({ "error": detail }))).into_response()
-}
-
-/// A generic `503` for when the payer could not be screened (error or timeout).
-fn service_unavailable() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({ "error": "service temporarily unavailable" })),
-    )
-        .into_response()
+    json_error(StatusCode::BAD_GATEWAY, detail)
 }
 
 /// Decode a base64 `Payment-Response` receipt back to JSON, the test-side inverse of
