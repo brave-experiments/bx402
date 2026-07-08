@@ -36,6 +36,10 @@ use crate::Config;
 /// Canary key used to probe the bucket at startup.
 const CANARY_KEY: &str = "bx402.canary";
 
+/// How long a screen may take before it counts as unavailable. Bounds the paid
+/// request path; the S3 client's own timeout is a looser startup backstop.
+const SCREEN_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Screens identifiers against the restricted-address S3 bucket. `Clone` is cheap: the
 /// inner `aws_sdk_s3::Client` is `Arc`-backed, like `reqwest::Client`.
 #[derive(Clone)]
@@ -70,13 +74,18 @@ impl RestrictedAddressScreener {
         Self { client, bucket }
     }
 
-    /// Screen one identifier, exactly as given.
+    /// Screen one identifier, exactly as given, within [`SCREEN_TIMEOUT`].
     ///
     /// The caller must pass the already-canonical form (casing differs per chain; see
-    /// the module docs). The identifier is base64url-encoded into the S3 key.
+    /// the module docs). The identifier is base64url-encoded into the S3 key. A lookup
+    /// that outlives the deadline is a [`ScreenError`] like any other failure, so the
+    /// caller denies it the same way.
     pub(crate) async fn screen(&self, identifier: &str) -> Result<Screening, ScreenError> {
-        self.head_key(URL_SAFE_NO_PAD.encode(identifier.as_bytes()))
-            .await
+        let lookup = self.head_key(URL_SAFE_NO_PAD.encode(identifier.as_bytes()));
+        match tokio::time::timeout(SCREEN_TIMEOUT, lookup).await {
+            Ok(screened) => screened,
+            Err(elapsed) => Err(ScreenError(Box::new(elapsed))),
+        }
     }
 
     /// Look up one exact S3 key with `HeadObject`:
