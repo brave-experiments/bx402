@@ -10,7 +10,6 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use x402_axum::facilitator_client::FacilitatorClient;
@@ -39,10 +38,6 @@ const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
 /// Flat price per request, in USDC base units (6 decimals, so `5_000` = 0.005 USDC).
 /// One rate for every request today; pricing may later vary by endpoint or by rail.
 const PRICE_USDC_BASE_UNITS: u64 = 5_000;
-
-/// How long a payer screen may take before it counts as unavailable. Bounds the paid
-/// request path; the screener's own client timeout is a looser startup backstop.
-const SCREEN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Returns `true` if the request carries an x402 V2 payment proof.
 pub(crate) fn has_payment(headers: &HeaderMap) -> bool {
@@ -177,15 +172,7 @@ async fn screen_payer(
     let Some(payer) = payer else {
         return Some(payment_rejected(GENERIC_REJECTION));
     };
-    // A timeout and a screen error both deny the same way, differing only in the log.
-    let screened = match tokio::time::timeout(SCREEN_TIMEOUT, screener.screen(&payer)).await {
-        Ok(screened) => screened,
-        Err(_elapsed) => {
-            tracing::error!("payer screening timed out after {SCREEN_TIMEOUT:?}");
-            return Some(service_unavailable());
-        }
-    };
-    match screened {
+    match screener.screen(&payer).await {
         Ok(Screening::Allowed) => None,
         Ok(Screening::Blocked) => Some(payment_rejected(GENERIC_REJECTION)),
         Err(err) => {

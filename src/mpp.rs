@@ -7,8 +7,6 @@
 //! Unlike x402 there is no facilitator service behind this rail: the `mpp` SDK
 //! verifies a credential and settles it on Tempo in the same call.
 
-use std::time::Duration;
-
 use axum::{
     Json,
     extract::Request,
@@ -44,10 +42,6 @@ const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
 /// charges the same 0.005 through its own `PRICE_USDC_BASE_UNITS`; a price change
 /// edits both consts.
 const PRICE_USD_BASE_UNITS: u64 = 5_000;
-
-/// How long a signer screen may take before it counts as unavailable. Bounds the
-/// paid request path; the screener's own client timeout is a looser startup backstop.
-const SCREEN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The concrete SDK handler behind [`Client`]: the Tempo charge method over the
 /// SDK's own RPC provider, named once so signatures stay readable.
@@ -205,15 +199,7 @@ async fn screen_signer(
     let Some(signer) = signer else {
         return Some(payment_rejected());
     };
-    // A timeout and a screen error both deny the same way, differing only in the log.
-    let screened = match tokio::time::timeout(SCREEN_TIMEOUT, screener.screen(&signer)).await {
-        Ok(screened) => screened,
-        Err(_elapsed) => {
-            tracing::error!("signer screening timed out after {SCREEN_TIMEOUT:?}");
-            return Some(service_unavailable());
-        }
-    };
-    match screened {
+    match screener.screen(&signer).await {
         Ok(Screening::Allowed) => None,
         Ok(Screening::Blocked) => Some(payment_rejected()),
         Err(err) => {
