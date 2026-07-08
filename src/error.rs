@@ -51,8 +51,22 @@ impl IntoResponse for AppError {
         } else {
             tracing::debug!(error = ?self, "request rejected");
         }
-        (status, Json(json!({ "error": message }))).into_response()
+        json_error(status, message)
     }
+}
+
+/// The one envelope for every error a client sees, shared by [`AppError`] and
+/// the rails.
+pub(crate) fn json_error(status: StatusCode, detail: &str) -> Response {
+    (status, Json(json!({ "error": detail }))).into_response()
+}
+
+/// A generic `503` for a payer that could not be screened, identical on every rail.
+pub(crate) fn service_unavailable() -> Response {
+    json_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "service temporarily unavailable",
+    )
 }
 
 #[cfg(test)]
