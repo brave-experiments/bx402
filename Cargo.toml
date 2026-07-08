@@ -33,6 +33,7 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["default-htt
 # legacy rustls connector, so no vulnerable TLS stack.
 aws-config = "1"
 base64 = "0.22"
+moka = { version = "0.12.15", features = ["future"] }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"

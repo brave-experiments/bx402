@@ -10,6 +10,13 @@
 //! other error (timeout, misconfiguration, S3 outage) blocks the payment rather than
 //! letting it through unchecked.
 //!
+//! A short-lived cache sits in front of the `HeadObject`, so repeat screens of the same
+//! identifier skip the round-trip:
+//!
+//! - only definite results (`Allowed`/`Blocked`) are cached, for [`SCREEN_CACHE_TTL`]
+//! - the TTL bounds how long a newly restricted address can keep paying
+//! - errors are never cached, so an unreachable bucket re-screens every request
+//!
 //! The module is chain agnostic. It screens the identifier string exactly as given and
 //! knows nothing about the address itself. It returns a plain outcome, never an HTTP
 //! response; the rail turns that outcome into a status code.
@@ -36,12 +43,25 @@ use crate::Config;
 /// Canary key used to probe the bucket at startup.
 const CANARY_KEY: &str = "bx402.canary";
 
+/// How long a definite screen result stays cached. This bounds staleness: a newly
+/// restricted address keeps paying until its cached `Allowed` entry expires.
+const SCREEN_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// Cap on the number of cached identifiers. Screening runs before the payment is verified,
+/// so untrusted addresses reach the cache. The cap bounds memory: once the cache is full,
+/// the oldest entry is evicted.
+const SCREEN_CACHE_MAX_ENTRIES: u64 = 100_000;
+
 /// Screens identifiers against the restricted-address S3 bucket. `Clone` is cheap: the
-/// inner `aws_sdk_s3::Client` is `Arc`-backed, like `reqwest::Client`.
+/// inner `aws_sdk_s3::Client` and the cache are both `Arc`-backed, so every clone shares
+/// one client and one cache.
 #[derive(Clone)]
 pub struct RestrictedAddressScreener {
     client: aws_sdk_s3::Client,
     bucket: String,
+    /// Recently screened identifiers, each mapped to its definite result for
+    /// [`SCREEN_CACHE_TTL`]. Only `Allowed`/`Blocked` are cached, never a [`ScreenError`].
+    cache: moka::future::Cache<String, Screening>,
 }
 
 /// The two definite answers a screen can give.
@@ -67,16 +87,42 @@ pub(crate) struct ScreenError(#[source] Box<dyn std::error::Error + Send + Sync>
 
 impl RestrictedAddressScreener {
     pub(crate) fn new(client: aws_sdk_s3::Client, bucket: String) -> Self {
-        Self { client, bucket }
+        Self::with_ttl(client, bucket, SCREEN_CACHE_TTL)
+    }
+
+    /// Build a screener whose cache entries live for `ttl`. Production uses
+    /// [`SCREEN_CACHE_TTL`] via [`new`](Self::new); tests inject a short `ttl` to exercise
+    /// expiry.
+    fn with_ttl(client: aws_sdk_s3::Client, bucket: String, ttl: Duration) -> Self {
+        let cache = moka::future::Cache::builder()
+            .max_capacity(SCREEN_CACHE_MAX_ENTRIES)
+            .time_to_live(ttl)
+            .build();
+        Self {
+            client,
+            bucket,
+            cache,
+        }
     }
 
     /// Screen one identifier, exactly as given.
     ///
-    /// The caller must pass the already-canonical form (casing differs per chain; see
-    /// the module docs). The identifier is base64url-encoded into the S3 key.
+    /// The caller must pass the already-canonical form; casing differs per chain (see the
+    /// module docs). The result comes from the cache when possible, otherwise from a live
+    /// `HeadObject`:
+    ///
+    /// - cache hit: return the stored result, no S3 call
+    /// - cache miss: encode the identifier into the S3 key, look it up, cache the answer
+    /// - [`ScreenError`]: never cached, so the next request checks S3 again
     pub(crate) async fn screen(&self, identifier: &str) -> Result<Screening, ScreenError> {
-        self.head_key(URL_SAFE_NO_PAD.encode(identifier.as_bytes()))
-            .await
+        if let Some(hit) = self.cache.get(identifier).await {
+            return Ok(hit);
+        }
+        let screening = self
+            .head_key(URL_SAFE_NO_PAD.encode(identifier.as_bytes()))
+            .await?;
+        self.cache.insert(identifier.to_string(), screening).await;
+        Ok(screening)
     }
 
     /// Look up one exact S3 key with `HeadObject`:
@@ -205,13 +251,21 @@ mod tests {
         test_screener(endpoint, "restricted-address-bucket")
     }
 
-    /// Screen `"0xanything"` against a mock S3 that answers every `HEAD` with `status`.
-    async fn screen_against(status: u16) -> Result<Screening, ScreenError> {
+    /// Mount a HEAD mock that answers with `status` exactly `hits` times, failing the test
+    /// on drop if it was called a different number of times.
+    async fn server_expecting(status: u16, hits: u64) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("HEAD"))
             .respond_with(ResponseTemplate::new(status))
+            .expect(hits)
             .mount(&server)
             .await;
+        server
+    }
+
+    /// Screen `"0xanything"` against a mock S3 that answers one `HEAD` with `status`.
+    async fn screen_against(status: u16) -> Result<Screening, ScreenError> {
+        let server = server_expecting(status, 1).await;
         screener_for(server.uri()).screen("0xanything").await
     }
 
@@ -279,6 +333,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn caches_allowed_result() {
+        let server = server_expecting(404, 1).await;
+        let screener = screener_for(server.uri());
+        assert_eq!(
+            screener.screen("0xpayer").await.unwrap(),
+            Screening::Allowed
+        );
+        assert_eq!(
+            screener.screen("0xpayer").await.unwrap(),
+            Screening::Allowed,
+            "the second screen is served from the cache",
+        );
+        // `.expect(1)` is verified when the server drops: only one HEAD reached S3.
+    }
+
+    #[tokio::test]
+    async fn caches_blocked_result() {
+        let server = server_expecting(200, 1).await;
+        let screener = screener_for(server.uri());
+        assert_eq!(
+            screener.screen("0xpayer").await.unwrap(),
+            Screening::Blocked
+        );
+        assert_eq!(
+            screener.screen("0xpayer").await.unwrap(),
+            Screening::Blocked,
+            "a blocked result is cached too",
+        );
+    }
+
+    #[tokio::test]
+    async fn does_not_cache_errors() {
+        // Two HEADs expected: an error is never cached, so it re-screens every time.
+        let server = server_expecting(500, 2).await;
+        let screener = screener_for(server.uri());
+        assert!(screener.screen("0xpayer").await.is_err());
+        assert!(screener.screen("0xpayer").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn distinct_identifiers_screen_separately() {
+        // Two different identifiers are two different keys, so each hits S3 once.
+        let server = server_expecting(404, 2).await;
+        let screener = screener_for(server.uri());
+        assert_eq!(screener.screen("0xone").await.unwrap(), Screening::Allowed);
+        assert_eq!(screener.screen("0xtwo").await.unwrap(), Screening::Allowed);
+    }
+
+    #[tokio::test]
+    async fn expired_entry_rescreens() {
+        // A short TTL, so the cached entry expires between the two screens and the second
+        // one goes back to S3. moka times entries with its own clock, so this uses a brief
+        // real sleep rather than a paused runtime clock.
+        let server = server_expecting(404, 2).await;
+        let screener = RestrictedAddressScreener::with_ttl(
+            test_client(server.uri()),
+            "restricted-address-bucket".to_string(),
+            Duration::from_millis(50),
+        );
+        assert_eq!(
+            screener.screen("0xpayer").await.unwrap(),
+            Screening::Allowed
+        );
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert_eq!(
+            screener.screen("0xpayer").await.unwrap(),
+            Screening::Allowed,
+            "the entry expired, so the screen re-reads from S3",
+        );
+    }
+
+    #[tokio::test]
     async fn init_disabled_when_bucket_unset() {
         let config = crate::Config {
             brave_search_api_key: "key".to_string(),
@@ -317,13 +443,9 @@ mod tests {
         assert!(matches!(status, Status::Enabled { .. }));
     }
 
-    /// Run `init_with` against a mock S3 that answers every `HEAD` with `status`.
+    /// Run `init_with` against a mock S3 that answers one `HEAD` with `status`.
     async fn init_against(status: u16) -> anyhow::Result<(RestrictedAddressScreener, Status)> {
-        let server = MockServer::start().await;
-        Mock::given(method("HEAD"))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
+        let server = server_expecting(status, 1).await;
         init_with(
             test_client(server.uri()),
             "restricted-address-bucket".to_string(),
