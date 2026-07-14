@@ -1,5 +1,5 @@
-# cargo-deny configuration. CI runs `cargo deny check advisories`, which audits the
-# dependency graph as it is actually resolved and compiled. The lockfile also pins
+# cargo-deny configuration. CI runs `cargo deny check advisories bans`, which audits
+# the dependency graph as it is actually resolved and compiled. The lockfile also pins
 # optional dependencies that no feature ever activates, so auditing the lockfile
 # (cargo-audit) reports advisories against code that is never built.
 
@@ -10,3 +10,9 @@
 # only to watch.
 unmaintained = "workspace"
 yanked = "deny"
+
+[bans]
+multiple-versions = "allow"
+# Signer recovery must decode transactions with the same tempo-primitives the
+# mpp SDK verifies with. A second resolved version would split the two decoders.
+deny = [{ crate = "tempo-primitives", deny-multiple-versions = true }]

@@ -29,8 +29,8 @@ x402-axum = "2.0.0"
 # Seller side of the Machine Payments Protocol on Tempo. The only default feature picks
 # a TLS stack for the crate's optional HTTP client, which we don't enable, so defaults stay off.
 mpp = { version = "0.10.4", default-features = false, features = ["server", "tempo"] }
-# MPP signer recovery. Must resolve to the same versions the mpp SDK uses. A unit
-# test fails if the lock ever carries a second tempo-primitives.
+# MPP signer recovery. tempo-primitives must resolve to the same version the mpp
+# SDK uses. The bans check in deny.toml enforces this.
 tempo-primitives = "1.8"
 alloy-primitives = "1"
 # Default features pull a vulnerable TLS stack (rustls-webpki 0.101.7). We opt out and

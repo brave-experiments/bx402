@@ -350,22 +350,6 @@ mod tests {
         assert_eq!(parsed.reference, "0xtxhash");
     }
 
-    /// Signer recovery decodes with `tempo-primitives` directly, and is only
-    /// faithful while that is the same version the mpp SDK verifies with. Cargo
-    /// would happily resolve two versions side by side after a major bump of the
-    /// SDK's copy, forking the two decoders silently; this fails the build's tests
-    /// instead.
-    #[test]
-    fn the_lockfile_carries_one_tempo_primitives() {
-        let lock = include_str!("../Cargo.lock");
-        let versions = lock.matches("name = \"tempo-primitives\"").count();
-        assert_eq!(
-            versions, 1,
-            "two tempo-primitives versions resolved: signer recovery and SDK verification \
-             would decode transactions with different codecs"
-        );
-    }
-
     #[test]
     fn signer_recovery_requires_a_decodable_signed_transaction() {
         use mpp::protocol::core::PaymentPayload;
