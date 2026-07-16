@@ -22,8 +22,8 @@ use mpp::protocol::methods::tempo::TEMPO_TX_TYPE_ID;
 use mpp::server::{ErrorCode, Mpp, TempoChargeMethod, TempoConfig, TempoProvider, tempo};
 use tempo_primitives::transaction::AASigned;
 
-use crate::error::{json_error, service_unavailable};
-use crate::screener::{RestrictedAddressScreener, Screening};
+use crate::error::json_error;
+use crate::screener::RestrictedAddressScreener;
 use crate::{AppError, Config};
 
 /// The settlement receipt returns to the client in the `Payment-Receipt` response
@@ -142,7 +142,9 @@ pub(crate) async fn handle(
     // transaction is never broadcast and no funds move. Without a screener there
     // is nothing to consult, and the signer is not recovered at all.
     if let Some(screener) = &screener
-        && let Some(denied) = screen_signer(screener, signer_address(&payload)).await
+        && let Err(denied) = screener
+            .require_allowed(signer_address(&payload), payment_rejected())
+            .await
     {
         return denied;
     }
@@ -182,28 +184,6 @@ fn attach_receipt(mut response: Response, receipt: &Receipt) -> Response {
         .headers_mut()
         .insert(HeaderName::from_static(PAYMENT_RECEIPT_HEADER), value);
     response
-}
-
-/// Screen the transaction's signer; returns the refusal to send, or `None` to proceed:
-///
-/// - allowed: `None`
-/// - blocked, or no signer to screen: generic `402`
-/// - could not screen (error or timeout): `503`
-async fn screen_signer(
-    screener: &RestrictedAddressScreener,
-    signer: Option<String>,
-) -> Option<Response> {
-    let Some(signer) = signer else {
-        return Some(payment_rejected());
-    };
-    match screener.screen(&signer).await {
-        Ok(Screening::Allowed) => None,
-        Ok(Screening::Blocked) => Some(payment_rejected()),
-        Err(err) => {
-            tracing::error!(error = ?err, "signer screening failed");
-            Some(service_unavailable())
-        }
-    }
 }
 
 /// The payer, recovered from the signed transaction's own signature: the address
@@ -469,39 +449,6 @@ mod tests {
         for (name, payload) in cases {
             assert!(signer_address(&payload).is_none(), "case: {name}");
         }
-    }
-
-    #[tokio::test]
-    async fn screening_outcomes_map_to_responses() {
-        // The screener HEADs the S3 bucket: 200 is a list hit, 404 a miss, anything
-        // else means the list could not be consulted.
-        let cases = [
-            (200, Some(StatusCode::PAYMENT_REQUIRED)),
-            (404, None),
-            (500, Some(StatusCode::SERVICE_UNAVAILABLE)),
-        ];
-        for (s3_status, expected) in cases {
-            let (_server, screener) = crate::screener::test_screener_answering(s3_status).await;
-
-            let refusal = screen_signer(&screener, Some("0xsigner".to_string())).await;
-            assert_eq!(
-                refusal.map(|response| response.status()),
-                expected,
-                "s3 status: {s3_status}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn screening_requires_a_recoverable_signer() {
-        // With a screener configured, a payment whose signer cannot be recovered is
-        // refused without consulting anything (the endpoint is unreachable).
-        let screener = crate::screener::test_screener("http://127.0.0.1:1".to_string());
-        let refusal = screen_signer(&screener, None).await;
-        assert_eq!(
-            refusal.map(|response| response.status()),
-            Some(StatusCode::PAYMENT_REQUIRED)
-        );
     }
 
     #[test]

@@ -11,8 +11,9 @@
 //! letting it through unchecked.
 //!
 //! The module is chain agnostic. It screens the identifier string exactly as given and
-//! knows nothing about the address itself. It returns a plain outcome, never an HTTP
-//! response; the rail turns that outcome into a status code.
+//! knows nothing about the address itself. The screen returns a plain outcome, and one
+//! shared helper turns that outcome into the caller's refusal, so every rail denies
+//! the same way.
 //!
 //! Canonicalization belongs to the caller, because it differs per chain:
 //!
@@ -28,10 +29,12 @@ use anyhow::Context;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::operation::head_object::HeadObjectError as SdkErr;
+use axum::response::Response;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::Config;
+use crate::error::service_unavailable;
 
 /// Canary key used to probe the bucket at startup.
 const CANARY_KEY: &str = "bx402.canary";
@@ -53,7 +56,7 @@ pub struct RestrictedAddressScreener {
 /// When the screener cannot give a definite answer, it returns [`ScreenError`] instead,
 /// and the caller must still deny the payment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Screening {
+enum Screening {
     /// On the restricted list. Deny the payment.
     Blocked,
     /// Not on the list.
@@ -67,7 +70,7 @@ pub(crate) enum Screening {
 /// source for logs and is never shown to clients.
 #[derive(Debug, thiserror::Error)]
 #[error("address screening unavailable")]
-pub(crate) struct ScreenError(#[source] Box<dyn std::error::Error + Send + Sync>);
+struct ScreenError(#[source] Box<dyn std::error::Error + Send + Sync>);
 
 impl RestrictedAddressScreener {
     pub(crate) fn new(client: aws_sdk_s3::Client, bucket: String) -> Self {
@@ -80,13 +83,37 @@ impl RestrictedAddressScreener {
     /// the module docs). The identifier is base64url-encoded into the S3 key. A lookup
     /// that outlives the deadline is a [`ScreenError`] like any other failure, so the
     /// caller denies it the same way.
-    pub(crate) async fn screen(&self, identifier: &str) -> Result<Screening, ScreenError> {
+    async fn screen(&self, identifier: &str) -> Result<Screening, ScreenError> {
         let lookup = self.head_key(URL_SAFE_NO_PAD.encode(identifier.as_bytes()));
         match tokio::time::timeout(SCREEN_TIMEOUT, lookup).await {
             Ok(screened) => screened,
             Err(_) => Err(ScreenError(
                 format!("lookup exceeded the {SCREEN_TIMEOUT:?} screening deadline").into(),
             )),
+        }
+    }
+
+    /// Screen `identifier` and decide whether the payment proceeds. An `Err`
+    /// carries the refusal to send instead of serving the request.
+    ///
+    /// A payment with no identifier to screen is refused like a listed one,
+    /// with the rail's `rejected` response. A screening failure is logged and
+    /// refused with the shared `503`.
+    pub(crate) async fn require_allowed(
+        &self,
+        identifier: Option<String>,
+        rejected: Response,
+    ) -> Result<(), Response> {
+        let Some(identifier) = identifier else {
+            return Err(rejected);
+        };
+        match self.screen(&identifier).await {
+            Ok(Screening::Allowed) => Ok(()),
+            Ok(Screening::Blocked) => Err(rejected),
+            Err(err) => {
+                tracing::error!(error = ?err, "address screening failed");
+                Err(service_unavailable())
+            }
         }
     }
 
@@ -232,6 +259,8 @@ pub(crate) async fn test_screener_answering(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -239,6 +268,45 @@ mod tests {
     async fn screen_against(status: u16) -> Result<Screening, ScreenError> {
         let (_server, screener) = test_screener_answering(status).await;
         screener.screen("0xanything").await
+    }
+
+    /// The rejection response a rail would pass to `require_allowed`.
+    fn rejected() -> Response {
+        StatusCode::PAYMENT_REQUIRED.into_response()
+    }
+
+    #[tokio::test]
+    async fn require_allowed_maps_outcomes_to_refusals() {
+        // 200 is a list hit, 404 a miss, anything else means the list could
+        // not be consulted.
+        let cases = [
+            (200, Some(StatusCode::PAYMENT_REQUIRED)),
+            (404, None),
+            (500, Some(StatusCode::SERVICE_UNAVAILABLE)),
+        ];
+        for (s3_status, expected) in cases {
+            let (_server, screener) = test_screener_answering(s3_status).await;
+            let refusal = screener
+                .require_allowed(Some("0xanything".to_string()), rejected())
+                .await;
+            assert_eq!(
+                refusal.err().map(|response| response.status()),
+                expected,
+                "s3 status: {s3_status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn require_allowed_refuses_a_missing_identifier() {
+        // Refused without consulting anything. The endpoint is unreachable, so
+        // reaching it would surface as a 503 instead.
+        let screener = test_screener("http://127.0.0.1:1".to_string());
+        let refusal = screener.require_allowed(None, rejected()).await;
+        assert_eq!(
+            refusal.err().map(|response| response.status()),
+            Some(StatusCode::PAYMENT_REQUIRED)
+        );
     }
 
     #[tokio::test]

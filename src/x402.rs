@@ -13,8 +13,8 @@ use axum::{
 use serde_json::{Value, json};
 use x402_axum::facilitator_client::FacilitatorClient;
 
-use crate::error::{json_error, service_unavailable};
-use crate::screener::{RestrictedAddressScreener, Screening};
+use crate::error::json_error;
+use crate::screener::RestrictedAddressScreener;
 use crate::{AppError, Config};
 use x402_chain_eip155::{KnownNetworkEip155, V2Eip155Exact, chain::ChecksummedAddress};
 use x402_types::{
@@ -117,7 +117,11 @@ pub(crate) async fn handle(
 
     // Screen the payer before any facilitator or upstream call, so a blocked signer
     // touches neither.
-    if let Some(denied) = screen_payer(screener.as_ref(), payer).await {
+    if let Some(screener) = &screener
+        && let Err(denied) = screener
+            .require_allowed(payer, payment_rejected(GENERIC_REJECTION))
+            .await
+    {
         return denied;
     }
 
@@ -158,29 +162,6 @@ const GENERIC_REJECTION: &str = "x402 payment did not verify";
 /// Shared message for a payment we could not settle, whether the facilitator declined it
 /// or was unreachable, so the client cannot tell the two apart.
 const SETTLE_FAILED: &str = "x402 payment could not be settled";
-
-/// Screen the payer; returns the refusal to send, or `None` to proceed:
-///
-/// - allowed, or no screener configured: `None`
-/// - blocked, or no payer to screen: generic `402`
-/// - could not screen (error or timeout): `503`
-async fn screen_payer(
-    screener: Option<&RestrictedAddressScreener>,
-    payer: Option<String>,
-) -> Option<Response> {
-    let screener = screener?;
-    let Some(payer) = payer else {
-        return Some(payment_rejected(GENERIC_REJECTION));
-    };
-    match screener.screen(&payer).await {
-        Ok(Screening::Allowed) => None,
-        Ok(Screening::Blocked) => Some(payment_rejected(GENERIC_REJECTION)),
-        Err(err) => {
-            tracing::error!(error = ?err, "payer screening failed");
-            Some(service_unavailable())
-        }
-    }
-}
 
 /// Decode the client's base64 JSON payment payload from `PAYMENT-SIGNATURE` into the
 /// facilitator's verify/settle request (wrapping it with our advertised
