@@ -69,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
+      - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2.83.1
         with:
           tool: cargo-deny
       - name: Audit compiled dependencies
