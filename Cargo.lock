@@ -6754,9 +6754,9 @@ dependencies = [
 
 [[package]]
 name = "x402-axum"
-version = "2.0.1"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea776d956cb45e01a50564f98a54f0d57a64f21923bd6a61f6eb23d4d85e2b52"
+checksum = "800b1f6eed4a8c3a338ae0ff81343cc33958da133973766c72e6b3f83497c878"
 dependencies = [
  "axum-core",
  "http 1.4.1",
