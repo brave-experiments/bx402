@@ -7,6 +7,8 @@
 //! Unlike x402 there is no facilitator service behind this rail: the `mpp` SDK
 //! verifies a credential and settles it on Tempo in the same call.
 
+use std::time::Duration;
+
 use axum::{
     extract::Request,
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
@@ -18,7 +20,9 @@ use serde_json::json;
 use alloy_primitives::Bytes;
 use mpp::protocol::core::{PaymentCredential, PaymentPayload, Receipt};
 use mpp::protocol::intents::ChargeRequest;
-use mpp::protocol::methods::tempo::TEMPO_TX_TYPE_ID;
+#[cfg(test)]
+pub(crate) use mpp::protocol::methods::tempo::{CHAIN_ID as TEMPO_CHAIN_ID, MODERATO_CHAIN_ID};
+use mpp::protocol::methods::tempo::{PATH_USD, TEMPO_TX_TYPE_ID, TempoNetwork};
 use mpp::server::{ErrorCode, Mpp, TempoChargeMethod, TempoConfig, TempoProvider, tempo};
 use tempo_primitives::transaction::AASigned;
 
@@ -36,12 +40,13 @@ const REALM: &str = "bx402";
 /// The EVM treasury address that receives MPP payments (the challenge recipient).
 const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
 
-/// Flat price per request in base units of the challenge currency (6 decimals, so
-/// `5_000` = 0.005). The currency follows the configured network: pathUSD on the
-/// Moderato testnet, USDC on Tempo mainnet, each worth one dollar. The x402 rail
-/// charges the same 0.005 through its own `PRICE_USDC_BASE_UNITS`; a price change
-/// edits both consts.
+/// Flat price per request in base units of pathUSD (6 decimals, so `5_000` =
+/// 0.005). The x402 rail charges the same 0.005 through its own
+/// `PRICE_USDC_BASE_UNITS`. A price change edits both consts.
 const PRICE_USD_BASE_UNITS: u64 = 5_000;
+
+/// How long to wait for the startup chain-id query before giving up.
+const CHAIN_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The concrete SDK handler behind [`Client`]: the Tempo charge method over the
 /// SDK's own RPC provider, named once so signatures stay readable.
@@ -82,29 +87,66 @@ pub(crate) struct Client {
     charge: ChargeRequest,
 }
 
-/// A bad `MPP_RPC_URL` or unusable `MPP_SECRET_KEY` is a startup
-/// misconfiguration, surfaced as [`AppError`]. The Tempo chain and challenge
-/// currency both follow from the RPC URL.
-pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
+/// Build the MPP client for the configured RPC endpoint.
+///
+/// * The chain is whatever the endpoint reports at startup, never assumed
+///   from the URL. An unsupported chain is refused.
+/// * The charge currency is pinned to pathUSD, the same TIP-20 address on
+///   every Tempo network, overriding the SDK default of USDC on mainnet.
+/// * An unreachable endpoint or an unusable `MPP_SECRET_KEY` is a startup
+///   misconfiguration, surfaced as [`AppError`].
+pub(crate) async fn client(config: &Config) -> Result<Client, AppError> {
+    let chain_id = get_chain_id(&config.mpp_rpc_url).await?;
+    TempoNetwork::from_chain_id(chain_id).ok_or_else(|| {
+        AppError::InvalidConfig(format!("MPP: unsupported Tempo chain {chain_id}"))
+    })?;
     let builder = tempo(TempoConfig {
         recipient: PAY_TO_EVM,
     })
     .rpc_url(&config.mpp_rpc_url)
+    .chain_id(chain_id)
+    .currency(PATH_USD)
     .realm(REALM)
     .secret_key(&config.mpp_secret_key);
     let handler =
         Handler::create(builder).map_err(|err| AppError::InvalidConfig(format!("MPP: {err}")))?;
-    let currency = handler
-        .currency()
-        .ok_or_else(|| AppError::InvalidConfig("MPP: no currency bound to the handler".into()))?;
     let charge = ChargeRequest {
         amount: PRICE_USD_BASE_UNITS.to_string(),
-        currency: currency.to_string(),
-        recipient: handler.recipient().map(str::to_string),
-        method_details: handler.chain_id().map(|id| json!({ "chainId": id })),
+        currency: PATH_USD.to_string(),
+        recipient: Some(PAY_TO_EVM.to_string()),
+        method_details: Some(json!({ "chainId": chain_id })),
         ..Default::default()
     };
     Ok(Client { handler, charge })
+}
+
+/// The chain id the RPC endpoint reports for itself (`eth_chainId`).
+async fn get_chain_id(rpc_url: &str) -> Result<u64, AppError> {
+    let invalid = |detail: String| AppError::InvalidConfig(format!("MPP_RPC_URL: {detail}"));
+
+    let client = reqwest::Client::builder()
+        .timeout(CHAIN_QUERY_TIMEOUT)
+        .build()
+        .map_err(|err| invalid(format!("chain query client: {err}")))?;
+
+    let request = json!({ "jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": [] });
+    let body: serde_json::Value = client
+        .post(rpc_url)
+        .json(&request)
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+        .map_err(|err| invalid(format!("eth_chainId query failed: {err}")))?
+        .json()
+        .await
+        .map_err(|err| invalid(format!("eth_chainId response is not JSON: {err}")))?;
+
+    // The chain id comes back as a hex string like "0xa5bf".
+    body["result"]
+        .as_str()
+        .and_then(|hex| hex.strip_prefix("0x"))
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .ok_or_else(|| invalid(format!("eth_chainId returned no chain id: {body}")))
 }
 
 /// Drive the MPP pay flow for a request that carries a credential.
@@ -229,12 +271,52 @@ fn gateway_error() -> Response {
     json_error(StatusCode::BAD_GATEWAY, "payment network unavailable")
 }
 
+/// [`client`] built against a mock RPC reporting `chain`: tests construct
+/// clients through the production path, only the endpoint is canned.
+#[cfg(test)]
+pub(crate) async fn client_on(config: &Config, chain: u64) -> Result<Client, AppError> {
+    let rpc = make_tempo_rpc(chain).await;
+    client(&Config {
+        mpp_rpc_url: rpc.uri(),
+        ..config.clone()
+    })
+    .await
+}
+
+/// A mock Tempo RPC answering the startup `eth_chainId` query with `chain`,
+/// exactly once. Later calls get a `404` while the port stays bound, so a
+/// test holding the server has a dead RPC that nothing can rebind.
+#[cfg(test)]
+async fn make_tempo_rpc(chain: u64) -> wiremock::MockServer {
+    use wiremock::matchers::{body_partial_json, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({ "method": "eth_chainId" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0", "id": 1, "result": format!("0x{chain:x}")
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    server
+}
+
+/// A mock RPC on Moderato, the tests' chain, answering the startup chain query.
+#[cfg(test)]
+pub(crate) async fn test_rpc() -> wiremock::MockServer {
+    make_tempo_rpc(MODERATO_CHAIN_ID).await
+}
+
 /// Mint the `Authorization` header value for a credential answering our own
 /// challenge with `payload`: the test-side counterpart of [`credential`], using
-/// the same client the app under test builds from `config`.
+/// the same charge the app under test builds from `config`.
 #[cfg(test)]
-fn credential_header(config: &Config, payload: PaymentPayload) -> String {
-    let client = client(config).expect("test config builds the mpp client");
+async fn credential_header(config: &Config, payload: PaymentPayload) -> String {
+    let client = client_on(config, MODERATO_CHAIN_ID)
+        .await
+        .expect("test config builds the mpp client");
     let challenge = client
         .handler
         .charge_challenge_with_options(&client.charge, None, None)
@@ -245,8 +327,8 @@ fn credential_header(config: &Config, payload: PaymentPayload) -> String {
 
 /// A credential whose payload says the client already broadcast the transfer.
 #[cfg(test)]
-pub(crate) fn hash_credential_header(config: &Config) -> String {
-    credential_header(config, PaymentPayload::hash("0xdeadbeef"))
+pub(crate) async fn hash_credential_header(config: &Config) -> String {
+    credential_header(config, PaymentPayload::hash("0xdeadbeef")).await
 }
 
 /// A credential paying with the forged signed transaction. Returns the header and
@@ -255,7 +337,7 @@ pub(crate) fn hash_credential_header(config: &Config) -> String {
 #[cfg(test)]
 pub(crate) async fn signed_transaction_credential_header(config: &Config) -> (String, String) {
     let (tx, signer) = forged_transaction().await;
-    let header = credential_header(config, PaymentPayload::transaction(tx));
+    let header = credential_header(config, PaymentPayload::transaction(tx)).await;
     (header, signer)
 }
 
@@ -312,10 +394,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn client_rejects_an_unparseable_rpc_url() {
+    #[tokio::test]
+    async fn client_rejects_an_unparseable_rpc_url() {
         assert!(matches!(
-            client(&test_config("not a url")),
+            client(&test_config("not a url")).await,
+            Err(AppError::InvalidConfig(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn client_requires_a_reachable_endpoint() {
+        assert!(matches!(
+            client(&test_config("http://127.0.0.1:1")).await,
             Err(AppError::InvalidConfig(_))
         ));
     }
@@ -356,9 +446,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn challenge_advertises_the_charge_credentials_answer() {
-        let client = client(&test_config("https://rpc.moderato.tempo.xyz")).unwrap();
+    #[tokio::test]
+    async fn challenge_advertises_the_charge_credentials_answer() {
+        let client = client_on(&Config::for_tests(), MODERATO_CHAIN_ID)
+            .await
+            .unwrap();
         let (name, value) = challenge(&client).expect("the challenge builds");
         assert_eq!(name, header::WWW_AUTHENTICATE);
 
@@ -377,38 +469,30 @@ mod tests {
         assert_eq!(advertised.method_details, expected.method_details);
     }
 
-    #[test]
-    fn the_charge_follows_the_network_and_pins_the_price() {
-        // The SDK's default currency per network: pathUSD (the TIP-20 precompile) on
-        // the Moderato testnet, USDC on Tempo mainnet.
-        let cases = [
-            (
-                "https://rpc.moderato.tempo.xyz",
-                "0x20c0000000000000000000000000000000000000",
-                42431,
-            ),
-            (
-                "https://rpc.tempo.xyz",
-                "0x20C000000000000000000000b9537d11c60E8b50",
-                4217,
-            ),
-        ];
-        for (rpc_url, currency, chain_id) in cases {
-            let request = client(&test_config(rpc_url)).unwrap().charge;
+    #[tokio::test]
+    async fn the_charge_follows_the_chain_and_pins_the_price() {
+        for chain in [MODERATO_CHAIN_ID, TEMPO_CHAIN_ID] {
+            let request = client_on(&Config::for_tests(), chain).await.unwrap().charge;
 
+            assert_eq!(request.amount, PRICE_USD_BASE_UNITS.to_string(), "{chain}");
             assert_eq!(
-                request.amount,
-                PRICE_USD_BASE_UNITS.to_string(),
-                "{rpc_url}"
+                request.currency,
+                "0x20c0000000000000000000000000000000000000",
+                "{chain}"
             );
-            assert_eq!(request.currency, currency, "{rpc_url}");
-            assert_eq!(request.recipient.as_deref(), Some(PAY_TO_EVM), "{rpc_url}");
+            assert_eq!(request.recipient.as_deref(), Some(PAY_TO_EVM), "{chain}");
             assert_eq!(
                 request.method_details,
-                Some(json!({ "chainId": chain_id })),
-                "{rpc_url}"
+                Some(json!({ "chainId": chain })),
+                "{chain}"
             );
         }
+
+        // Any other chain is refused rather than served with a default token.
+        assert!(matches!(
+            client_on(&Config::for_tests(), 1).await,
+            Err(AppError::InvalidConfig(_))
+        ));
     }
 
     #[test]

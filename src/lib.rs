@@ -61,12 +61,13 @@ pub fn banner() -> String {
 /// Returns a `Router` rather than serving it, so tests can drive the same router as
 /// the binary via `tower::ServiceExt::oneshot` without binding a socket. Takes
 /// [`Config`] by value so tests can point the proxy at mock upstreams instead of the
-/// live Brave Search API and facilitator.
-pub fn app(
+/// live Brave Search API and facilitator. Async because the MPP rail resolves its
+/// chain from the RPC endpoint during construction.
+pub async fn app(
     config: Config,
     screener: Option<RestrictedAddressScreener>,
 ) -> Result<Router, AppError> {
-    let context = dispatch::context(&config, screener)?;
+    let context = dispatch::context(&config, screener).await?;
     let state = AppState {
         // Build fails only if the TLS backend cannot initialize. That is a startup
         // fault like a bad URL or bucket, so it aborts startup rather than panicking.
@@ -163,6 +164,27 @@ mod tests {
         }
     }
 
+    /// Build the app for a test against `rpc`, the mock Tempo endpoint
+    /// answering the startup chain query.
+    async fn app_with(
+        rpc: &MockServer,
+        config: Config,
+        screener: Option<RestrictedAddressScreener>,
+    ) -> axum::Router {
+        let config = Config {
+            mpp_rpc_url: rpc.uri(),
+            ..config
+        };
+        app(config, screener).await.unwrap()
+    }
+
+    /// [`app_with`] a throwaway RPC, for tests that never verify an MPP
+    /// payment.
+    async fn test_app(config: Config, screener: Option<RestrictedAddressScreener>) -> axum::Router {
+        let rpc = crate::mpp::test_rpc().await;
+        app_with(&rpc, config, screener).await
+    }
+
     /// Start a wiremock server standing in for the x402 facilitator: `POST /verify`
     /// reports `valid`, `POST /settle` reports `settles` (with a canned receipt on
     /// success). The two are independent so a test can drive any verify/settle pairing.
@@ -216,8 +238,8 @@ mod tests {
         for (name, value) in headers_for(rail) {
             request = request.header(name, value);
         }
-        app(config, None)
-            .unwrap()
+        test_app(config, None)
+            .await
             .oneshot(request.body(Body::empty()).unwrap())
             .await
             .unwrap()
@@ -230,13 +252,17 @@ mod tests {
         assert!(banner.contains(env!("CARGO_PKG_VERSION")));
     }
 
-    #[test]
-    fn app_rejects_an_unparseable_facilitator_url() {
+    #[tokio::test]
+    async fn app_rejects_an_unparseable_facilitator_url() {
         let config = config_with(
             "http://upstream.invalid".to_string(),
             "not a url".to_string(),
         );
-        assert!(matches!(app(config, None), Err(AppError::InvalidConfig(_))));
+        // The facilitator is rejected before the MPP chain query, so no RPC is needed.
+        assert!(matches!(
+            app(config, None).await,
+            Err(AppError::InvalidConfig(_))
+        ));
     }
 
     #[tokio::test]
@@ -369,21 +395,21 @@ mod tests {
     }
 
     /// Drive `app()` with an MPP `Authorization` header through the paid route.
+    /// The RPC answers only the startup chain query, so a verify-time RPC call
+    /// surfaces as a 502.
     async fn get_mpp(
         config: Config,
         screener: Option<RestrictedAddressScreener>,
         authorization: &str,
     ) -> axum::response::Response {
+        let rpc = crate::mpp::test_rpc().await;
+        let app = app_with(&rpc, config, screener).await;
         let request = Request::builder()
             .uri(format!("{WEB_SEARCH_PATH}?q=rust"))
             .header("authorization", authorization)
             .body(Body::empty())
             .unwrap();
-        app(config, screener)
-            .unwrap()
-            .oneshot(request)
-            .await
-            .unwrap()
+        app.oneshot(request).await.unwrap()
     }
 
     /// An upstream that must never be called, for tests asserting a payment is
@@ -400,17 +426,13 @@ mod tests {
         upstream
     }
 
-    /// A config wired to an upstream that must never be called and an unreachable
-    /// Tempo RPC, so a refusal is proven to happen before either is touched. A
-    /// reached RPC surfaces as a 502; a reached upstream fails the mock's
-    /// expectation when the returned server drops.
+    /// A config for `get_mpp` tests proving a refusal happens before any
+    /// network touch:
+    /// * a reached RPC surfaces as a 502 (it answers only the startup query)
+    /// * a reached upstream fails its zero-request expectation on drop
     async fn refusing_mpp_config() -> (Config, MockServer) {
         let upstream = untouched_upstream().await;
-        let config = Config {
-            mpp_rpc_url: "http://127.0.0.1:1".to_string(),
-            ..test_config(upstream.uri())
-        };
-        (config, upstream)
+        (test_config(upstream.uri()), upstream)
     }
 
     #[tokio::test]
@@ -419,7 +441,7 @@ mod tests {
 
         // The credential answers our real challenge, but its payload says the client
         // already broadcast the transfer itself, which this service does not accept.
-        let credential = crate::mpp::hash_credential_header(&config);
+        let credential = crate::mpp::hash_credential_header(&config).await;
         let response = get_mpp(config, None, &credential).await;
 
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
@@ -468,8 +490,8 @@ mod tests {
             .header("x-forwarded-proto", "https")
             .body(Body::empty())
             .unwrap();
-        let response = app(test_config("http://upstream.invalid".to_string()), None)
-            .unwrap()
+        let response = test_app(test_config("http://upstream.invalid".to_string()), None)
+            .await
             .oneshot(request)
             .await
             .unwrap();
@@ -504,8 +526,8 @@ mod tests {
             .await;
 
         let facilitator = mock_facilitator(true, true).await;
-        let response = app(config_with(upstream.uri(), facilitator.uri()), None)
-            .unwrap()
+        let response = test_app(config_with(upstream.uri(), facilitator.uri()), None)
+            .await
             .oneshot(paid_request())
             .await
             .unwrap();
@@ -533,8 +555,8 @@ mod tests {
     async fn rejected_payment_returns_402_and_never_calls_upstream() {
         let upstream = untouched_upstream().await;
         let facilitator = mock_facilitator(false, true).await;
-        let response = app(config_with(upstream.uri(), facilitator.uri()), None)
-            .unwrap()
+        let response = test_app(config_with(upstream.uri(), facilitator.uri()), None)
+            .await
             .oneshot(paid_request())
             .await
             .unwrap();
@@ -558,8 +580,8 @@ mod tests {
             .await;
 
         let facilitator = mock_facilitator(true, false).await;
-        let response = app(config_with(upstream.uri(), facilitator.uri()), None)
-            .unwrap()
+        let response = test_app(config_with(upstream.uri(), facilitator.uri()), None)
+            .await
             .oneshot(paid_request())
             .await
             .unwrap();
@@ -627,8 +649,8 @@ mod tests {
         let upstream = untouched_upstream().await;
 
         // Facilitator is unreachable: a blocked signer must not reach it either.
-        let response = app(test_config(upstream.uri()), Some(screener))
-            .unwrap()
+        let response = test_app(test_config(upstream.uri()), Some(screener))
+            .await
             .oneshot(paid_request_from(from))
             .await
             .unwrap();
@@ -654,11 +676,11 @@ mod tests {
             .await;
 
         let facilitator = mock_facilitator(true, true).await;
-        let response = app(
+        let response = test_app(
             config_with(upstream.uri(), facilitator.uri()),
             Some(screener),
         )
-        .unwrap()
+        .await
         .oneshot(paid_request_from(
             "0x1111111111111111111111111111111111111111",
         ))
@@ -674,8 +696,8 @@ mod tests {
         let (_s3, screener) = crate::screener::test_screener_answering(500).await;
         let upstream = untouched_upstream().await;
 
-        let response = app(test_config(upstream.uri()), Some(screener))
-            .unwrap()
+        let response = test_app(test_config(upstream.uri()), Some(screener))
+            .await
             .oneshot(paid_request_from(
                 "0x2222222222222222222222222222222222222222",
             ))

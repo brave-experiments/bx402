@@ -8,6 +8,7 @@ use crate::AppError;
 const DEFAULT_BRAVE_SEARCH_API_BASE_URL: &str = "https://api.search.brave.com";
 
 /// Runtime configuration, read once from the environment at startup.
+#[cfg_attr(test, derive(Clone))]
 pub struct Config {
     /// Brave Search API key, forwarded upstream as `X-Subscription-Token`.
     pub brave_search_api_key: String,
@@ -18,7 +19,7 @@ pub struct Config {
     /// Docs: <https://docs.x402.org/core-concepts/facilitator>
     pub x402_facilitator_url: String,
     /// Tempo RPC endpoint the MPP rail verifies and settles payments against. The
-    /// URL also selects the network: a Moderato URL means the testnet chain.
+    /// chain is discovered by querying the endpoint at startup.
     pub mpp_rpc_url: String,
     /// Secret that marks MPP challenges as ours. Challenge ids are HMACs under this
     /// key, so only a credential answering a challenge this service issued verifies.

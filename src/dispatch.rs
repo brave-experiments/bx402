@@ -82,13 +82,13 @@ pub(crate) struct Context {
 /// Assemble the dispatch context from config and the already-built screener (the
 /// screener is built asynchronously at startup, so it is passed in rather than built
 /// here).
-pub(crate) fn context(
+pub(crate) async fn context(
     config: &Config,
     screener: Option<RestrictedAddressScreener>,
 ) -> Result<Context, AppError> {
     Ok(Context {
         x402: x402::client(config)?,
-        mpp: mpp::client(config)?,
+        mpp: mpp::client(config).await?,
         screener,
     })
 }
@@ -218,14 +218,10 @@ mod tests {
 
     #[tokio::test]
     async fn cold_402_advertises_both_rails() {
-        let config = Config {
-            mpp_rpc_url: "https://rpc.moderato.tempo.xyz".to_string(),
-            ..Config::for_tests()
-        };
-        let response = cold_402(
-            &mpp::client(&config).unwrap(),
-            "https://bx402.example.com/res/v1/web/search",
-        );
+        let mpp = mpp::client_on(&Config::for_tests(), mpp::MODERATO_CHAIN_ID)
+            .await
+            .unwrap();
+        let response = cold_402(&mpp, "https://bx402.example.com/res/v1/web/search");
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
         // MPP rail: a `Payment` challenge in `WWW-Authenticate`.
