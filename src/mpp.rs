@@ -21,7 +21,7 @@ use alloy_primitives::Bytes;
 use mpp::protocol::core::{PaymentCredential, PaymentPayload, Receipt};
 use mpp::protocol::intents::ChargeRequest;
 #[cfg(test)]
-pub(crate) use mpp::protocol::methods::tempo::{CHAIN_ID as TEMPO_CHAIN_ID, MODERATO_CHAIN_ID};
+use mpp::protocol::methods::tempo::{CHAIN_ID as TEMPO_CHAIN_ID, MODERATO_CHAIN_ID};
 use mpp::protocol::methods::tempo::{PATH_USD, TEMPO_TX_TYPE_ID, TempoNetwork};
 use mpp::server::{ErrorCode, Mpp, TempoChargeMethod, TempoConfig, TempoProvider, tempo};
 use tempo_primitives::transaction::AASigned;
@@ -101,9 +101,13 @@ pub(crate) async fn client(config: &Config) -> Result<Client, AppError> {
     let network = TempoNetwork::from_chain_id(chain_id).ok_or_else(|| {
         AppError::InvalidConfig(format!("MPP: unsupported Tempo chain {chain_id}"))
     })?;
-    // Moderato is the SDK's only testnet variant, so this equality is the
-    // testnet check.
-    if network == TempoNetwork::Moderato && !config.allow_testnet {
+    // Exhaustive so a new SDK network variant fails the build here, forcing
+    // its testnet classification to be decided.
+    let testnet = match network {
+        TempoNetwork::Moderato => true,
+        TempoNetwork::Mainnet => false,
+    };
+    if testnet && !config.allow_testnet {
         return Err(AppError::InvalidConfig(format!(
             "MPP_RPC_URL: chain {chain_id} is a testnet; set ALLOW_TESTNET=true to accept it"
         )));
@@ -282,7 +286,7 @@ fn gateway_error() -> Response {
 /// [`client`] built against a mock RPC reporting `chain`: tests construct
 /// clients through the production path, only the endpoint is canned.
 #[cfg(test)]
-pub(crate) async fn client_on(config: &Config, chain: u64) -> Result<Client, AppError> {
+async fn client_on(config: &Config, chain: u64) -> Result<Client, AppError> {
     let rpc = make_tempo_rpc(chain).await;
     client(&Config {
         mpp_rpc_url: rpc.uri(),
@@ -403,11 +407,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_rejects_an_unparseable_rpc_url() {
-        assert!(matches!(
-            client(&test_config("not a url")).await,
-            Err(AppError::InvalidConfig(_))
-        ));
+    async fn client_requires_a_usable_endpoint() {
+        // Both die in the startup chain query, the first step of the build.
+        for endpoint in ["not a url", "http://127.0.0.1:1"] {
+            assert!(matches!(
+                client(&test_config(endpoint)).await,
+                Err(AppError::InvalidConfig(_))
+            ));
+        }
     }
 
     #[tokio::test]
@@ -426,14 +433,6 @@ mod tests {
 
         // Mainnet needs no flag.
         assert!(client_on(&config, TEMPO_CHAIN_ID).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn client_requires_a_reachable_endpoint() {
-        assert!(matches!(
-            client(&test_config("http://127.0.0.1:1")).await,
-            Err(AppError::InvalidConfig(_))
-        ));
     }
 
     /// A minimal challenge echo; the payload gate reads only the payload beside it.

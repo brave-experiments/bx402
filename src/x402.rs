@@ -65,6 +65,10 @@ fn accepts(config: &Config) -> Result<Vec<v2::PaymentRequirements>, AppError> {
     Ok(accepts)
 }
 
+/// The error line every cold `402` carries, in the envelope and in the
+/// fallback body alike.
+const PAYMENT_REQUIRED: &str = "Payment required";
+
 /// Label for each paid endpoint, keyed by request path.
 fn endpoint_description(path: &str) -> &'static str {
     match path {
@@ -79,7 +83,7 @@ pub(crate) fn challenge(client: &Client, resource: &str) -> Value {
     let path = uri.as_ref().map(|u| u.path()).unwrap_or(resource);
     let body = v2::PaymentRequired {
         x402_version: v2::X402Version2,
-        error: Some("Payment required".to_string()),
+        error: Some(PAYMENT_REQUIRED.to_string()),
         resource: Some(v2::ResourceInfo {
             url: resource.to_string(),
             description: Some(endpoint_description(path).to_string()),
@@ -90,7 +94,7 @@ pub(crate) fn challenge(client: &Client, resource: &str) -> Value {
     };
     serde_json::to_value(body).unwrap_or_else(|err| {
         tracing::error!(error = %err, "x402 challenge could not be serialized");
-        json!({ "error": "Payment required" })
+        json!({ "error": PAYMENT_REQUIRED })
     })
 }
 
@@ -305,28 +309,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn accepts_offers_mainnet_and_the_allowed_testnet() {
-        // The networks and the mainnet asset are spelled out so an upstream
-        // change to the SDK's consts fails here instead of silently moving the
-        // charge.
-        let entries = accepts(&Config::for_tests()).unwrap();
-        let [mainnet, testnet] = entries.as_slice() else {
-            panic!("a testnet config offers mainnet and the testnet");
-        };
-
-        assert_eq!(mainnet.scheme, "exact");
-        assert_eq!(mainnet.network.to_string(), "eip155:8453"); // Base mainnet
-        assert_eq!(
-            mainnet.asset.to_string(),
-            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" // circulating USDC on Base
-        );
-        assert_eq!(mainnet.amount, PRICE_USDC_BASE_UNITS.to_string()); // decimal base units
-        assert_eq!(mainnet.pay_to, PAY_TO_EVM);
-        assert_eq!(testnet.network.to_string(), "eip155:84532"); // Base Sepolia
-        assert_eq!(testnet.amount, PRICE_USDC_BASE_UNITS.to_string());
-        assert_eq!(testnet.pay_to, PAY_TO_EVM);
-
-        // Without the testnet flag, mainnet is the only offer.
+    fn without_the_testnet_flag_only_mainnet_is_offered() {
         let production = Config {
             allow_testnet: false,
             ..Config::for_tests()
@@ -335,7 +318,7 @@ mod tests {
         let [only] = entries.as_slice() else {
             panic!("a production config offers only mainnet");
         };
-        assert_eq!(only.network.to_string(), "eip155:8453");
+        assert_eq!(only.network.to_string(), "eip155:8453"); // Base mainnet
     }
 
     /// A header map carrying `payload` as the base64 `PAYMENT-SIGNATURE`.
@@ -365,6 +348,8 @@ mod tests {
 
     #[test]
     fn challenge_emits_the_full_payment_required_payload() {
+        // Every offer field is spelled out so an upstream change to the SDK's
+        // consts fails here instead of silently moving the charge.
         let client = client(&Config::for_tests()).unwrap();
         let body = challenge(&client, "https://bx402.example.com/res/v1/web/search");
 

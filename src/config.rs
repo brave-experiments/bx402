@@ -43,7 +43,8 @@ impl Config {
     /// * `MPP_SECRET_KEY` (required): HMAC secret binding MPP challenges to this service.
     /// * `BRAVE_SEARCH_API_BASE_URL` (optional): defaults to the public Brave Search API endpoint.
     /// * `RESTRICTED_ADDRESS_S3_BUCKET` (optional): unset or empty turns screening off.
-    /// * `ALLOW_TESTNET` (optional): `true` additionally serves testnet networks.
+    /// * `ALLOW_TESTNET` (optional): `true` permits testnet networks, with each
+    ///   rail deciding what that admits.
     ///
     /// An absent required variable yields [`AppError::MissingConfig`]; a present but
     /// non-Unicode one yields [`AppError::InvalidConfig`].
