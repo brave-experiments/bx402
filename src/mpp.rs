@@ -90,16 +90,24 @@ pub(crate) struct Client {
 /// Build the MPP client for the configured RPC endpoint.
 ///
 /// * The chain is whatever the endpoint reports at startup, never assumed
-///   from the URL. An unsupported chain is refused.
+///   from the URL. An unsupported chain is refused, and a testnet chain is
+///   served only when the testnet is allowed.
 /// * The charge currency is pinned to pathUSD, the same TIP-20 address on
 ///   every Tempo network, overriding the SDK default of USDC on mainnet.
 /// * An unreachable endpoint or an unusable `MPP_SECRET_KEY` is a startup
 ///   misconfiguration, surfaced as [`AppError`].
 pub(crate) async fn client(config: &Config) -> Result<Client, AppError> {
     let chain_id = get_chain_id(&config.mpp_rpc_url).await?;
-    TempoNetwork::from_chain_id(chain_id).ok_or_else(|| {
+    let network = TempoNetwork::from_chain_id(chain_id).ok_or_else(|| {
         AppError::InvalidConfig(format!("MPP: unsupported Tempo chain {chain_id}"))
     })?;
+    // Moderato is the SDK's only testnet variant, so this equality is the
+    // testnet check.
+    if network == TempoNetwork::Moderato && !config.allow_testnet {
+        return Err(AppError::InvalidConfig(format!(
+            "MPP_RPC_URL: chain {chain_id} is a testnet; set ALLOW_TESTNET=true to accept it"
+        )));
+    }
     let builder = tempo(TempoConfig {
         recipient: PAY_TO_EVM,
     })
@@ -403,6 +411,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_testnet_chain_requires_the_testnet_flag() {
+        let config = Config {
+            allow_testnet: false,
+            ..Config::for_tests()
+        };
+        let Err(err) = client_on(&config, MODERATO_CHAIN_ID).await else {
+            panic!("a testnet chain must be refused when testnets are off");
+        };
+        assert!(
+            err.to_string().contains("ALLOW_TESTNET"),
+            "error was: {err}"
+        );
+
+        // Mainnet needs no flag.
+        assert!(client_on(&config, TEMPO_CHAIN_ID).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn client_requires_a_reachable_endpoint() {
         assert!(matches!(
             client(&test_config("http://127.0.0.1:1")).await,
@@ -476,8 +502,7 @@ mod tests {
 
             assert_eq!(request.amount, PRICE_USD_BASE_UNITS.to_string(), "{chain}");
             assert_eq!(
-                request.currency,
-                "0x20c0000000000000000000000000000000000000",
+                request.currency, "0x20c0000000000000000000000000000000000000",
                 "{chain}"
             );
             assert_eq!(request.recipient.as_deref(), Some(PAY_TO_EVM), "{chain}");
