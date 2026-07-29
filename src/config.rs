@@ -19,7 +19,8 @@ pub struct Config {
     /// Docs: <https://docs.x402.org/core-concepts/facilitator>
     pub x402_facilitator_url: String,
     /// Tempo RPC endpoint the MPP rail verifies and settles payments against. The
-    /// chain is discovered by querying the endpoint at startup.
+    /// chain is discovered by querying the endpoint at startup. Testnet chains
+    /// require `ALLOW_TESTNET`.
     pub mpp_rpc_url: String,
     /// Secret that marks MPP challenges as ours. Challenge ids are HMACs under this
     /// key, so only a credential answering a challenge this service issued verifies.
@@ -27,6 +28,9 @@ pub struct Config {
     /// S3 bucket holding the restricted-address list. `None` turns screening off,
     /// the default for local and testnet runs.
     pub restricted_address_s3_bucket: Option<String>,
+    /// Accept testnet networks. Off in production, so faucet-money rails never
+    /// pay for real API traffic there.
+    pub allow_testnet: bool,
 }
 
 impl Config {
@@ -39,6 +43,7 @@ impl Config {
     /// * `MPP_SECRET_KEY` (required): HMAC secret binding MPP challenges to this service.
     /// * `BRAVE_SEARCH_API_BASE_URL` (optional): defaults to the public Brave Search API endpoint.
     /// * `RESTRICTED_ADDRESS_S3_BUCKET` (optional): unset or empty turns screening off.
+    /// * `ALLOW_TESTNET` (optional): `true` additionally serves testnet networks.
     ///
     /// An absent required variable yields [`AppError::MissingConfig`]; a present but
     /// non-Unicode one yields [`AppError::InvalidConfig`].
@@ -52,6 +57,7 @@ impl Config {
         let restricted_address_s3_bucket = env::var("RESTRICTED_ADDRESS_S3_BUCKET")
             .ok()
             .filter(|bucket| !bucket.is_empty());
+        let allow_testnet = env::var("ALLOW_TESTNET").is_ok_and(|value| value == "true");
         Ok(Self {
             brave_search_api_key,
             brave_search_api_base_url,
@@ -59,6 +65,7 @@ impl Config {
             mpp_rpc_url,
             mpp_secret_key,
             restricted_address_s3_bucket,
+            allow_testnet,
         })
     }
 }
@@ -75,6 +82,7 @@ impl Config {
             mpp_rpc_url: "http://tempo.invalid".to_string(),
             mpp_secret_key: "test-secret".to_string(),
             restricted_address_s3_bucket: None,
+            allow_testnet: true,
         }
     }
 }

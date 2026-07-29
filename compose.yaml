@@ -8,6 +8,8 @@ services:
       X402_FACILITATOR_URL: http://facilitator:8080
       MPP_RPC_URL: ${MPP_RPC_URL:-https://rpc.moderato.tempo.xyz}
       MPP_SECRET_KEY: ${MPP_SECRET_KEY}
+      # The compose stack is the testnet environment. Production unsets this.
+      ALLOW_TESTNET: ${ALLOW_TESTNET:-true}
     depends_on:
       facilitator:
         condition: service_healthy
