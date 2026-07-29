@@ -16,7 +16,10 @@ use x402_axum::facilitator_client::FacilitatorClient;
 use crate::error::json_error;
 use crate::screener::RestrictedAddressScreener;
 use crate::{AppError, Config};
-use x402_chain_eip155::{KnownNetworkEip155, V2Eip155Exact, chain::ChecksummedAddress};
+use x402_chain_eip155::{
+    KnownNetworkEip155, V2Eip155Exact,
+    chain::{ChecksummedAddress, Eip155TokenDeployment},
+};
 use x402_types::{
     networks::USDC,
     proto::{self, v2},
@@ -44,13 +47,22 @@ pub(crate) fn has_payment(headers: &HeaderMap) -> bool {
     headers.contains_key(V2_PAYMENT_HEADER)
 }
 
-/// Build the x402 V2 payment requirements we advertise and verify against. The same
-/// value seeds both the cold `402` body and payment verification at a later stage,
-/// so there is one source of truth for what we charge.
-fn requirements() -> v2::PaymentRequirements {
-    let pay_to: ChecksummedAddress = PAY_TO_EVM.parse().expect("PAY_TO_EVM is a valid address");
-    let usdc = USDC::base_sepolia();
-    V2Eip155Exact::price_tag(pay_to, usdc.amount(PRICE_USDC_BASE_UNITS)).requirements
+/// Build the list of payment offers we advertise and verify against. The same
+/// entries seed both the cold `402` body and payment verification, so there is
+/// one source of truth for what we charge: real USDC on Base mainnet, plus
+/// faucet USDC on Base Sepolia when the testnet is allowed.
+fn accepts(config: &Config) -> Result<Vec<v2::PaymentRequirements>, AppError> {
+    let pay_to: ChecksummedAddress = PAY_TO_EVM
+        .parse()
+        .map_err(|err| AppError::InvalidConfig(format!("x402 payTo: {err}")))?;
+    let offer = |usdc: Eip155TokenDeployment| {
+        V2Eip155Exact::price_tag(pay_to, usdc.amount(PRICE_USDC_BASE_UNITS)).requirements
+    };
+    let mut accepts = vec![offer(USDC::base())];
+    if config.allow_testnet {
+        accepts.push(offer(USDC::base_sepolia()));
+    }
+    Ok(accepts)
 }
 
 /// Label for each paid endpoint, keyed by request path.
@@ -62,7 +74,7 @@ fn endpoint_description(path: &str) -> &'static str {
 }
 
 /// x402's part of the cold `402`: the V2 `PaymentRequired` envelope for `resource`.
-pub(crate) fn challenge(resource: &str) -> Value {
+pub(crate) fn challenge(client: &Client, resource: &str) -> Value {
     let uri = resource.parse::<Uri>().ok();
     let path = uri.as_ref().map(|u| u.path()).unwrap_or(resource);
     let body = v2::PaymentRequired {
@@ -73,28 +85,41 @@ pub(crate) fn challenge(resource: &str) -> Value {
             description: Some(endpoint_description(path).to_string()),
             mime_type: Some("application/json".to_string()),
         }),
-        accepts: vec![requirements()],
+        accepts: client.accepts.clone(),
         extensions: Default::default(),
     };
-    serde_json::to_value(body).expect("PaymentRequired envelope serializes")
+    serde_json::to_value(body).unwrap_or_else(|err| {
+        tracing::error!(error = %err, "x402 challenge could not be serialized");
+        json!({ "error": "Payment required" })
+    })
 }
 
-/// The x402 facilitator client, newtyped so the rest of the crate names this module's
-/// type, not the SDK's, and `dispatch` can carry it as plain axum state.
+/// The x402 facilitator client and the payment offers we accept, wrapped so the
+/// rest of the crate names this module's type, not the SDK's, and `dispatch`
+/// can carry it as plain axum state.
 ///
 /// Returning `impl Facilitator + …` would hide the SDK just as well, but axum state
 /// must be a type we can name. The way to name an opaque type is a TAIT alias
 /// (`type Client = impl Facilitator + …`), and TAIT is not stable on our pinned
-/// toolchain, so a concrete newtype it is.
+/// toolchain, so a concrete struct it is.
 #[derive(Clone)]
-pub(crate) struct Client(FacilitatorClient);
+pub(crate) struct Client {
+    facilitator: FacilitatorClient,
+    /// Built once at startup. The cold `402` advertises exactly these entries
+    /// and a payment must accept one of them verbatim, so the two can never
+    /// disagree.
+    accepts: Vec<v2::PaymentRequirements>,
+}
 
 /// Build the x402 facilitator client from config. A bad `X402_FACILITATOR_URL` is a
 /// startup misconfiguration, surfaced as [`AppError`].
 pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
-    FacilitatorClient::try_from(config.x402_facilitator_url.as_str())
-        .map(Client)
-        .map_err(|err| AppError::InvalidConfig(format!("X402_FACILITATOR_URL: {err}")))
+    let facilitator = FacilitatorClient::try_from(config.x402_facilitator_url.as_str())
+        .map_err(|err| AppError::InvalidConfig(format!("X402_FACILITATOR_URL: {err}")))?;
+    Ok(Client {
+        facilitator,
+        accepts: accepts(config)?,
+    })
 }
 
 /// Drive the x402 pay flow for a request that carries a payment proof: verify, run
@@ -106,12 +131,12 @@ pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
 /// * search fails (4xx or 5xx): relayed as is, settlement skipped.
 /// * settlement fails: `502`, the response body withheld.
 pub(crate) async fn handle(
-    Client(facilitator_client): Client,
+    client: Client,
     screener: Option<RestrictedAddressScreener>,
     req: Request,
     next: Next,
 ) -> Response {
-    let Some((request, payer)) = decode_payment(req.headers()) else {
+    let Some((request, payer)) = decode_payment(req.headers(), &client.accepts) else {
         return payment_rejected("malformed x402 payment payload");
     };
 
@@ -127,7 +152,7 @@ pub(crate) async fn handle(
 
     // Verify before doing any work. A facilitator we cannot reach is our failure,
     // not the client's, so it is a 502 rather than a 402.
-    match facilitator_client.verify(&request).await {
+    match client.facilitator.verify(&request).await {
         Ok(response) if is_valid(&response) => {}
         Ok(_) => return payment_rejected(GENERIC_REJECTION),
         Err(err) => {
@@ -143,7 +168,7 @@ pub(crate) async fn handle(
 
     // `SettleRequest` is an alias of `VerifyRequest`, so the value we verified
     // settles unchanged. Withhold the (already produced) body unless it settles.
-    match facilitator_client.settle(&request).await {
+    match client.facilitator.settle(&request).await {
         Ok(receipt) if settled(&receipt) => attach_receipt(response, &receipt),
         Ok(receipt) => {
             tracing::error!(?receipt, "x402 facilitator reported settlement failure");
@@ -164,22 +189,33 @@ const GENERIC_REJECTION: &str = "x402 payment did not verify";
 const SETTLE_FAILED: &str = "x402 payment could not be settled";
 
 /// Decode the client's base64 JSON payment payload from `PAYMENT-SIGNATURE` into the
-/// facilitator's verify/settle request (wrapping it with our advertised
-/// [`requirements`]) and the payer to screen. Returns `None` if the header is absent or
-/// not the base64 JSON required.
+/// facilitator's verify/settle request and the payer to screen. Returns `None` if the
+/// header is absent, not the base64 JSON required, or accepts an offer we do not
+/// advertise.
+///
+/// The payload names the offer the payer accepted. Only an entry from `accepts`,
+/// matched verbatim, is passed on for verification, so a payer cannot write their
+/// own price, asset, or recipient.
 ///
 /// The payer is `Some` only for the eip3009 payload we advertise; a payload without
 /// `authorization.from` (e.g. a permit2 shape) yields `None`, which the caller rejects
 /// before any facilitator call when screening is on.
-fn decode_payment(headers: &HeaderMap) -> Option<(proto::VerifyRequest, Option<String>)> {
+fn decode_payment(
+    headers: &HeaderMap,
+    accepts: &[v2::PaymentRequirements],
+) -> Option<(proto::VerifyRequest, Option<String>)> {
     let header = headers.get(V2_PAYMENT_HEADER)?.to_str().ok()?;
     let decoded = Base64Bytes::from(header.as_bytes()).decode().ok()?;
     let payload: Value = serde_json::from_slice(&decoded).ok()?;
+    let chosen = payload.get("accepted")?;
+    let accepted = accepts
+        .iter()
+        .find(|entry| serde_json::to_value(entry).ok().as_ref() == Some(chosen))?;
     let payer = payer_address(&payload);
     let body = json!({
         "x402Version": 2,
         "paymentPayload": payload,
-        "paymentRequirements": requirements(),
+        "paymentRequirements": accepted,
     });
     let raw = serde_json::value::to_raw_value(&body).ok()?;
     Some((proto::VerifyRequest::from(raw), payer))
@@ -243,6 +279,16 @@ fn gateway_error(detail: &str) -> Response {
     json_error(StatusCode::BAD_GATEWAY, detail)
 }
 
+/// The `PAYMENT-SIGNATURE` value for a payment accepting the first offer built
+/// from `config`, carrying `payload` as the scheme payload. The test-side
+/// counterpart of [`decode_payment`].
+#[cfg(test)]
+pub(crate) fn test_payment_signature(config: &Config, payload: Value) -> String {
+    let entries = accepts(config).expect("the test config advertises an offer");
+    let body = json!({ "accepted": &entries[0], "payload": payload });
+    Base64Bytes::encode(body.to_string()).to_string()
+}
+
 /// Decode a base64 `Payment-Response` receipt back to JSON, the test-side inverse of
 /// [`attach_receipt`], so the crate's tests read receipts through this module too.
 #[cfg(test)]
@@ -259,18 +305,68 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn requirements_match_the_pricing_constants() {
-        let reqs = requirements();
+    fn accepts_offers_mainnet_and_the_allowed_testnet() {
+        // The networks and the mainnet asset are spelled out so an upstream
+        // change to the SDK's consts fails here instead of silently moving the
+        // charge.
+        let entries = accepts(&Config::for_tests()).unwrap();
+        let [mainnet, testnet] = entries.as_slice() else {
+            panic!("a testnet config offers mainnet and the testnet");
+        };
 
-        assert_eq!(reqs.scheme, "exact");
-        assert_eq!(reqs.network.to_string(), "eip155:84532"); // Base Sepolia
-        assert_eq!(reqs.amount, PRICE_USDC_BASE_UNITS.to_string()); // decimal base units
-        assert_eq!(reqs.pay_to, PAY_TO_EVM);
+        assert_eq!(mainnet.scheme, "exact");
+        assert_eq!(mainnet.network.to_string(), "eip155:8453"); // Base mainnet
+        assert_eq!(
+            mainnet.asset.to_string(),
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" // circulating USDC on Base
+        );
+        assert_eq!(mainnet.amount, PRICE_USDC_BASE_UNITS.to_string()); // decimal base units
+        assert_eq!(mainnet.pay_to, PAY_TO_EVM);
+        assert_eq!(testnet.network.to_string(), "eip155:84532"); // Base Sepolia
+        assert_eq!(testnet.amount, PRICE_USDC_BASE_UNITS.to_string());
+        assert_eq!(testnet.pay_to, PAY_TO_EVM);
+
+        // Without the testnet flag, mainnet is the only offer.
+        let production = Config {
+            allow_testnet: false,
+            ..Config::for_tests()
+        };
+        let entries = accepts(&production).unwrap();
+        let [only] = entries.as_slice() else {
+            panic!("a production config offers only mainnet");
+        };
+        assert_eq!(only.network.to_string(), "eip155:8453");
+    }
+
+    /// A header map carrying `payload` as the base64 `PAYMENT-SIGNATURE`.
+    fn payment_headers(payload: &Value) -> HeaderMap {
+        let encoded = Base64Bytes::encode(payload.to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert(V2_PAYMENT_HEADER, encoded.to_string().parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn decode_accepts_only_an_advertised_offer() {
+        let entries = accepts(&Config::for_tests()).unwrap();
+
+        let advertised = json!({ "accepted": &entries[0] });
+        assert!(decode_payment(&payment_headers(&advertised), &entries).is_some());
+
+        // A tampered offer (here, a self-granted discount) is refused.
+        let mut discounted = serde_json::to_value(&entries[0]).unwrap();
+        discounted["amount"] = json!("1");
+        let tampered = json!({ "accepted": discounted });
+        assert!(decode_payment(&payment_headers(&tampered), &entries).is_none());
+
+        // So is a payload naming no offer at all.
+        assert!(decode_payment(&payment_headers(&json!({})), &entries).is_none());
     }
 
     #[test]
     fn challenge_emits_the_full_payment_required_payload() {
-        let body = challenge("https://bx402.example.com/res/v1/web/search");
+        let client = client(&Config::for_tests()).unwrap();
+        let body = challenge(&client, "https://bx402.example.com/res/v1/web/search");
 
         let expected = json!({
             "x402Version": 2,
@@ -280,19 +376,34 @@ mod tests {
                 "description": "Brave Search API - Web / Search",
                 "mimeType": "application/json"
             },
-            "accepts": [{
-                "scheme": "exact",
-                "network": "eip155:84532",
-                "amount": "5000",
-                "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-                "payTo": "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d",
-                "maxTimeoutSeconds": 300,
-                "extra": {
-                    "assetTransferMethod": "eip3009",
-                    "name": "USDC",
-                    "version": "2"
+            "accepts": [
+                {
+                    "scheme": "exact",
+                    "network": "eip155:8453",
+                    "amount": "5000",
+                    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                    "payTo": "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d",
+                    "maxTimeoutSeconds": 300,
+                    "extra": {
+                        "assetTransferMethod": "eip3009",
+                        "name": "USD Coin",
+                        "version": "2"
+                    }
+                },
+                {
+                    "scheme": "exact",
+                    "network": "eip155:84532",
+                    "amount": "5000",
+                    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                    "payTo": "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d",
+                    "maxTimeoutSeconds": 300,
+                    "extra": {
+                        "assetTransferMethod": "eip3009",
+                        "name": "USDC",
+                        "version": "2"
+                    }
                 }
-            }]
+            ]
         });
 
         assert_eq!(body, expected);

@@ -50,15 +50,15 @@ fn classify(headers: &HeaderMap) -> Rail {
 ///   (the requested endpoint) back to the client.
 /// * MPP: the `WWW-Authenticate: Payment` challenge header, minted fresh for
 ///   each `402` (omitted if it cannot be built).
-fn cold_402(mpp: &mpp::Client, resource: &str) -> Response {
+fn cold_402(ctx: &Context, resource: &str) -> Response {
     let mut response = (
         StatusCode::PAYMENT_REQUIRED,
-        Json(x402::challenge(resource)),
+        Json(x402::challenge(&ctx.x402, resource)),
     )
         .into_response();
     // A rail that cannot produce its challenge is left out, so the 402 still
     // advertises whatever the other rail offers.
-    if let Some((name, value)) = mpp::challenge(mpp) {
+    if let Some((name, value)) = mpp::challenge(&ctx.mpp) {
         response.headers_mut().insert(name, value);
     }
     response
@@ -98,7 +98,7 @@ pub(crate) async fn context(
 /// never how a rail verifies.
 pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Next) -> Response {
     match classify(req.headers()) {
-        Rail::None => cold_402(&ctx.mpp, &absolute_uri(&req)),
+        Rail::None => cold_402(&ctx, &absolute_uri(&req)),
         Rail::Both => collision_400(),
         Rail::X402 => x402::handle(ctx.x402, ctx.screener, req, next).await,
         Rail::Mpp => mpp::handle(ctx.mpp, ctx.screener, req, next).await,
@@ -218,10 +218,13 @@ mod tests {
 
     #[tokio::test]
     async fn cold_402_advertises_both_rails() {
-        let mpp = mpp::client_on(&Config::for_tests(), mpp::MODERATO_CHAIN_ID)
-            .await
-            .unwrap();
-        let response = cold_402(&mpp, "https://bx402.example.com/res/v1/web/search");
+        let rpc = mpp::test_rpc().await;
+        let config = Config {
+            mpp_rpc_url: rpc.uri(),
+            ..Config::for_tests()
+        };
+        let ctx = context(&config, None).await.unwrap();
+        let response = cold_402(&ctx, "https://bx402.example.com/res/v1/web/search");
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
         // MPP rail: a `Payment` challenge in `WWW-Authenticate`.

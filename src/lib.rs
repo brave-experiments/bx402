@@ -143,9 +143,12 @@ mod tests {
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// A `PAYMENT-SIGNATURE` value that base64-decodes to the JSON object `{}` — enough
-    /// for the pay flow to parse a payload before the request reaches the facilitator.
-    const PAYMENT_SIGNATURE: &str = "e30="; // base64("{}")
+    /// A `PAYMENT-SIGNATURE` accepting the first offer the test config advertises,
+    /// with an empty scheme payload. Enough to pass decoding and reach the
+    /// facilitator.
+    fn payment_signature() -> String {
+        x402::test_payment_signature(&Config::for_tests(), serde_json::json!({}))
+    }
 
     fn config_with(base_url: String, facilitator_url: String) -> Config {
         Config {
@@ -211,16 +214,16 @@ mod tests {
     }
 
     /// The request headers a [`Rail`] state sends. The MPP credential is arbitrary
-    /// (dispatch keys on presence), but the x402 `payment-signature` must be the
-    /// base64 JSON the pay flow decodes before it reaches the facilitator.
-    fn headers_for(rail: Rail) -> Vec<(&'static str, &'static str)> {
+    /// (dispatch keys on presence), but the x402 `payment-signature` must accept
+    /// an advertised offer to pass decoding and reach the facilitator.
+    fn headers_for(rail: Rail) -> Vec<(&'static str, String)> {
         match rail {
             Rail::None => vec![],
-            Rail::X402 => vec![("payment-signature", PAYMENT_SIGNATURE)],
-            Rail::Mpp => vec![("authorization", "Payment test-cred")],
+            Rail::X402 => vec![("payment-signature", payment_signature())],
+            Rail::Mpp => vec![("authorization", "Payment test-cred".into())],
             Rail::Both => vec![
-                ("payment-signature", PAYMENT_SIGNATURE),
-                ("authorization", "Payment test-cred"),
+                ("payment-signature", payment_signature()),
+                ("authorization", "Payment test-cred".into()),
             ],
         }
     }
@@ -509,7 +512,7 @@ mod tests {
     fn paid_request() -> Request<Body> {
         Request::builder()
             .uri("/res/v1/web/search?q=rust")
-            .header("payment-signature", PAYMENT_SIGNATURE)
+            .header("payment-signature", payment_signature())
             .body(Body::empty())
             .unwrap()
     }
@@ -594,12 +597,13 @@ mod tests {
     }
 
     /// A paid `GET` whose payment payload names `from` as the payer, so the screener has
-    /// an address to check. The payload only needs `payload.authorization.from`; the
-    /// mock facilitator accepts the rest.
+    /// an address to check. The scheme payload only needs `authorization.from`.
+    /// The mock facilitator accepts the rest.
     fn paid_request_from(from: &str) -> Request<Body> {
-        use base64::Engine;
-        let payload = serde_json::json!({ "payload": { "authorization": { "from": from } } });
-        let signature = base64::engine::general_purpose::STANDARD.encode(payload.to_string());
+        let signature = x402::test_payment_signature(
+            &Config::for_tests(),
+            serde_json::json!({ "authorization": { "from": from } }),
+        );
         Request::builder()
             .uri("/res/v1/web/search?q=rust")
             .header("payment-signature", signature)
