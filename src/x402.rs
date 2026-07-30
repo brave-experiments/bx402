@@ -65,10 +65,6 @@ fn accepts(config: &Config) -> Result<Vec<v2::PaymentRequirements>, AppError> {
     Ok(accepts)
 }
 
-/// The error line every cold `402` carries, in the envelope and in the
-/// fallback body alike.
-const PAYMENT_REQUIRED: &str = "Payment required";
-
 /// Label for each paid endpoint, keyed by request path.
 fn endpoint_description(path: &str) -> &'static str {
     match path {
@@ -110,8 +106,7 @@ pub(crate) fn challenge(client: &Client, resource: &str) -> Value {
 pub(crate) struct Client {
     facilitator: FacilitatorClient,
     /// Built once at startup. The cold `402` advertises exactly these entries
-    /// and a payment must accept one of them verbatim, so the two can never
-    /// disagree.
+    /// and a payment must accept one of them, so the two can never disagree.
     accepts: Vec<v2::PaymentRequirements>,
 }
 
@@ -140,8 +135,17 @@ pub(crate) async fn handle(
     req: Request,
     next: Next,
 ) -> Response {
-    let Some((request, payer)) = decode_payment(req.headers(), &client.accepts) else {
-        return payment_rejected("malformed x402 payment payload");
+    let Some((payload, accepted, payer)) = decode_payment(req.headers()) else {
+        return payment_rejected(MALFORMED_PAYMENT);
+    };
+
+    // The payer must accept an offer we advertised, so it cannot name its own
+    // price, asset, or recipient. Refused like any other payment we decline.
+    let Some(offer) = client.accepts.iter().find(|offer| **offer == accepted) else {
+        return payment_rejected(GENERIC_REJECTION);
+    };
+    let Some(request) = verify_request(&payload, offer) else {
+        return payment_rejected(MALFORMED_PAYMENT);
     };
 
     // Screen the payer before any facilitator or upstream call, so a blocked signer
@@ -170,8 +174,8 @@ pub(crate) async fn handle(
         return response;
     }
 
-    // `SettleRequest` is an alias of `VerifyRequest`, so the value we verified
-    // settles unchanged. Withhold the (already produced) body unless it settles.
+    // The value we verified settles unchanged. Withhold the (already produced)
+    // body unless it settles.
     match client.facilitator.settle(&request).await {
         Ok(receipt) if settled(&receipt) => attach_receipt(response, &receipt),
         Ok(receipt) => {
@@ -185,6 +189,14 @@ pub(crate) async fn handle(
     }
 }
 
+/// The error line every cold `402` carries, in the envelope and in the
+/// fallback body alike.
+const PAYMENT_REQUIRED: &str = "Payment required";
+
+/// Shared message for a payment we could not read at all, whether the header,
+/// its base64, its JSON, or the offer it names is unusable.
+const MALFORMED_PAYMENT: &str = "malformed x402 payment payload";
+
 /// Shared message for every refused payment, so refusals are indistinguishable.
 const GENERIC_REJECTION: &str = "x402 payment did not verify";
 
@@ -192,37 +204,40 @@ const GENERIC_REJECTION: &str = "x402 payment did not verify";
 /// or was unreachable, so the client cannot tell the two apart.
 const SETTLE_FAILED: &str = "x402 payment could not be settled";
 
-/// Decode the client's base64 JSON payment payload from `PAYMENT-SIGNATURE` into the
-/// facilitator's verify/settle request and the payer to screen. Returns `None` if the
-/// header is absent, not the base64 JSON required, or accepts an offer we do not
-/// advertise.
+/// Decode the client's base64 JSON payment from `PAYMENT-SIGNATURE` into the raw
+/// payload, the offer the payer says it accepted, and the payer to screen.
+/// Returns `None` if the header is absent or not the base64 JSON required.
 ///
-/// The payload names the offer the payer accepted. Only an entry from `accepts`,
-/// matched verbatim, is passed on for verification, so a payer cannot write their
-/// own price, asset, or recipient.
+/// The accepted offer is decoded into the SDK's own type, so it compares by value
+/// against what we advertised rather than by how either side spells its JSON.
 ///
 /// The payer is `Some` only for the eip3009 payload we advertise; a payload without
 /// `authorization.from` (e.g. a permit2 shape) yields `None`, which the caller rejects
 /// before any facilitator call when screening is on.
-fn decode_payment(
-    headers: &HeaderMap,
-    accepts: &[v2::PaymentRequirements],
-) -> Option<(proto::VerifyRequest, Option<String>)> {
+fn decode_payment(headers: &HeaderMap) -> Option<(Value, v2::PaymentRequirements, Option<String>)> {
     let header = headers.get(V2_PAYMENT_HEADER)?.to_str().ok()?;
     let decoded = Base64Bytes::from(header.as_bytes()).decode().ok()?;
     let payload: Value = serde_json::from_slice(&decoded).ok()?;
-    let chosen = payload.get("accepted")?;
-    let accepted = accepts
-        .iter()
-        .find(|entry| serde_json::to_value(entry).ok().as_ref() == Some(chosen))?;
+    let accepted = serde_json::from_value(payload.get("accepted")?.clone()).ok()?;
     let payer = payer_address(&payload);
+    Some((payload, accepted, payer))
+}
+
+/// The facilitator's verify request for `payload`, charged against `offer`. The
+/// offer is ours, not the client's copy, so the facilitator only ever sees terms
+/// we advertised. `SettleRequest` is an alias of `VerifyRequest`, so the same
+/// value settles later.
+fn verify_request(
+    payload: &Value,
+    offer: &v2::PaymentRequirements,
+) -> Option<proto::VerifyRequest> {
     let body = json!({
         "x402Version": 2,
         "paymentPayload": payload,
-        "paymentRequirements": accepted,
+        "paymentRequirements": offer,
     });
     let raw = serde_json::value::to_raw_value(&body).ok()?;
-    Some((proto::VerifyRequest::from(raw), payer))
+    Some(proto::VerifyRequest::from(raw))
 }
 
 /// The payer to screen: the eip3009 `authorization.from`, lowercased to the screener's
@@ -306,7 +321,6 @@ pub(crate) fn decode_receipt(encoded: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn without_the_testnet_flag_only_mainnet_is_offered() {
@@ -330,20 +344,31 @@ mod tests {
     }
 
     #[test]
-    fn decode_accepts_only_an_advertised_offer() {
+    fn decode_reads_the_offer_the_payer_accepted() {
         let entries = accepts(&Config::for_tests()).unwrap();
 
         let advertised = json!({ "accepted": &entries[0] });
-        assert!(decode_payment(&payment_headers(&advertised), &entries).is_some());
+        let (_, accepted, _) =
+            decode_payment(&payment_headers(&advertised)).expect("an advertised offer decodes");
+        assert_eq!(accepted, entries[0]);
 
-        // A tampered offer (here, a self-granted discount) is refused.
+        // A payload naming no offer at all cannot be read.
+        assert!(decode_payment(&payment_headers(&json!({}))).is_none());
+    }
+
+    #[test]
+    fn a_tampered_offer_matches_nothing_we_advertise() {
+        // Here the payer grants itself a discount. The payload still decodes, so
+        // it is the value comparison in `handle` that refuses it.
+        let entries = accepts(&Config::for_tests()).unwrap();
         let mut discounted = serde_json::to_value(&entries[0]).unwrap();
         discounted["amount"] = json!("1");
-        let tampered = json!({ "accepted": discounted });
-        assert!(decode_payment(&payment_headers(&tampered), &entries).is_none());
 
-        // So is a payload naming no offer at all.
-        assert!(decode_payment(&payment_headers(&json!({})), &entries).is_none());
+        let (_, accepted, _) = decode_payment(&payment_headers(&json!({
+            "accepted": discounted
+        })))
+        .expect("a well-formed payload decodes");
+        assert!(!entries.contains(&accepted));
     }
 
     #[test]

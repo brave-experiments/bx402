@@ -98,14 +98,16 @@ pub(crate) struct Client {
 ///   misconfiguration, surfaced as [`AppError`].
 pub(crate) async fn client(config: &Config) -> Result<Client, AppError> {
     let chain_id = get_chain_id(&config.mpp_rpc_url).await?;
-    let network = TempoNetwork::from_chain_id(chain_id).ok_or_else(|| {
-        AppError::InvalidConfig(format!("MPP: unsupported Tempo chain {chain_id}"))
-    })?;
     // Exhaustive so a new SDK network variant fails the build here, forcing
     // its testnet classification to be decided.
-    let testnet = match network {
-        TempoNetwork::Moderato => true,
-        TempoNetwork::Mainnet => false,
+    let testnet = match TempoNetwork::from_chain_id(chain_id) {
+        Some(TempoNetwork::Moderato) => true,
+        Some(TempoNetwork::Mainnet) => false,
+        None => {
+            return Err(AppError::InvalidConfig(format!(
+                "MPP: unsupported Tempo chain {chain_id}"
+            )));
+        }
     };
     if testnet && !config.allow_testnet {
         return Err(AppError::InvalidConfig(format!(
@@ -399,19 +401,16 @@ mod tests {
     use super::*;
     use axum::response::IntoResponse;
 
-    fn test_config(rpc_url: &str) -> Config {
-        Config {
-            mpp_rpc_url: rpc_url.to_string(),
-            ..Config::for_tests()
-        }
-    }
-
     #[tokio::test]
     async fn client_requires_a_usable_endpoint() {
         // Both die in the startup chain query, the first step of the build.
         for endpoint in ["not a url", "http://127.0.0.1:1"] {
+            let config = Config {
+                mpp_rpc_url: endpoint.into(),
+                ..Config::for_tests()
+            };
             assert!(matches!(
-                client(&test_config(endpoint)).await,
+                client(&config).await,
                 Err(AppError::InvalidConfig(_))
             ));
         }
