@@ -46,19 +46,18 @@ fn classify(headers: &HeaderMap) -> Rail {
 
 /// Build the cold `402` from the rails' challenges:
 ///
-/// * x402: the V2 payment requirements as the JSON body, echoing `resource`
-///   (the requested endpoint) back to the client.
+/// * x402: the V2 payment requirements, echoing `resource` (the requested
+///   endpoint) back to the client. Served as the JSON body and again in the
+///   `Payment-Required` header, since some V2 clients read only the header.
 /// * MPP: the `WWW-Authenticate: Payment` challenge header, minted fresh for
 ///   each `402` (omitted if it cannot be built).
 fn cold_402(ctx: &Context, resource: &str) -> Response {
-    let mut response = (
-        StatusCode::PAYMENT_REQUIRED,
-        Json(x402::challenge(&ctx.x402, resource)),
-    )
-        .into_response();
+    let challenge = x402::challenge(&ctx.x402, resource);
+    let header = x402::challenge_header(&challenge);
+    let mut response = (StatusCode::PAYMENT_REQUIRED, Json(challenge)).into_response();
     // A rail that cannot produce its challenge is left out, so the 402 still
     // advertises whatever the other rail offers.
-    if let Some((name, value)) = mpp::challenge(&ctx.mpp) {
+    for (name, value) in [header, mpp::challenge(&ctx.mpp)].into_iter().flatten() {
         response.headers_mut().insert(name, value);
     }
     response
@@ -236,7 +235,9 @@ mod tests {
             .unwrap();
         assert!(challenge.starts_with("Payment "));
 
-        // x402 rail: V2 payment requirements as a JSON body.
+        // x402 rail: V2 payment requirements in the `Payment-Required` header
+        // and as a JSON body.
+        assert!(response.headers().contains_key("payment-required"));
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let requirements: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(requirements["x402Version"], 2);

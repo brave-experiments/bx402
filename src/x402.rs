@@ -35,6 +35,11 @@ const V2_PAYMENT_HEADER: &str = "payment-signature";
 /// as base64-encoded JSON, the dual of the `PAYMENT-SIGNATURE` request header.
 const PAYMENT_RECEIPT_HEADER: &str = "payment-response";
 
+/// x402 V2 serves the cold `402` requirements in the `Payment-Required` response
+/// header as base64-encoded JSON. Header-only clients read nothing else, so the
+/// envelope rides here as well as in the body.
+const PAYMENT_REQUIRED_HEADER: &str = "payment-required";
+
 /// The EVM treasury address that receives x402 payments (`payTo`).
 const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
 
@@ -92,6 +97,18 @@ pub(crate) fn challenge(client: &Client, resource: &str) -> Value {
         tracing::error!(error = %err, "x402 challenge could not be serialized");
         json!({ "error": PAYMENT_REQUIRED })
     })
+}
+
+/// The `Payment-Required` header carrying `challenge`'s envelope base64-encoded,
+/// for V2 clients that read the header and never the body. `None` if the value
+/// cannot be encoded, leaving the `402` body-only.
+pub(crate) fn challenge_header(challenge: &Value) -> Option<(HeaderName, HeaderValue)> {
+    let encoded = Base64Bytes::encode(challenge.to_string());
+    let Ok(value) = HeaderValue::from_str(&encoded.to_string()) else {
+        tracing::error!("x402 challenge could not be encoded as a header");
+        return None;
+    };
+    Some((HeaderName::from_static(PAYMENT_REQUIRED_HEADER), value))
 }
 
 /// The x402 facilitator client and the payment offers we accept, wrapped so the
@@ -417,5 +434,18 @@ mod tests {
         });
 
         assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn the_challenge_rides_in_the_payment_required_header_too() {
+        let client = client(&Config::for_tests()).unwrap();
+        let body = challenge(&client, "https://bx402.example.com/res/v1/web/search");
+
+        let (name, value) = challenge_header(&body).expect("the header builds");
+        assert_eq!(name, PAYMENT_REQUIRED_HEADER);
+
+        let decoded = Base64Bytes::from(value.as_bytes()).decode().unwrap();
+        let round_trip: Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(round_trip, body);
     }
 }
