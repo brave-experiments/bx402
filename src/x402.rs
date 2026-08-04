@@ -56,6 +56,10 @@ pub(crate) fn has_payment(headers: &HeaderMap) -> bool {
 /// entries seed both the cold `402` body and payment verification, so there is
 /// one source of truth for what we charge: real USDC on Base mainnet, plus
 /// faucet USDC on Base Sepolia when the testnet is allowed.
+///
+/// The order states the deployment's preference. A deployment that allows the
+/// testnet leads with it, so clients that take the first offer they support
+/// pay with faucet money rather than the real thing.
 fn accepts(config: &Config) -> Result<Vec<v2::PaymentRequirements>, AppError> {
     let pay_to: ChecksummedAddress = PAY_TO_EVM
         .parse()
@@ -63,10 +67,11 @@ fn accepts(config: &Config) -> Result<Vec<v2::PaymentRequirements>, AppError> {
     let offer = |usdc: Eip155TokenDeployment| {
         V2Eip155Exact::price_tag(pay_to, usdc.amount(PRICE_USDC_BASE_UNITS)).requirements
     };
-    let mut accepts = vec![offer(USDC::base())];
+    let mut accepts = Vec::new();
     if config.allow_testnet {
         accepts.push(offer(USDC::base_sepolia()));
     }
+    accepts.push(offer(USDC::base()));
     Ok(accepts)
 }
 
@@ -406,19 +411,6 @@ mod tests {
             "accepts": [
                 {
                     "scheme": "exact",
-                    "network": "eip155:8453",
-                    "amount": "5000",
-                    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-                    "payTo": "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d",
-                    "maxTimeoutSeconds": 300,
-                    "extra": {
-                        "assetTransferMethod": "eip3009",
-                        "name": "USD Coin",
-                        "version": "2"
-                    }
-                },
-                {
-                    "scheme": "exact",
                     "network": "eip155:84532",
                     "amount": "5000",
                     "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
@@ -427,6 +419,19 @@ mod tests {
                     "extra": {
                         "assetTransferMethod": "eip3009",
                         "name": "USDC",
+                        "version": "2"
+                    }
+                },
+                {
+                    "scheme": "exact",
+                    "network": "eip155:8453",
+                    "amount": "5000",
+                    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                    "payTo": "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d",
+                    "maxTimeoutSeconds": 300,
+                    "extra": {
+                        "assetTransferMethod": "eip3009",
+                        "name": "USD Coin",
                         "version": "2"
                     }
                 }
