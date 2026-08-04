@@ -23,17 +23,10 @@ env:
   MPP_RPC_URL: https://rpc.moderato.tempo.xyz
 
 jobs:
-  paid-search:
-    name: ${{ matrix.client }} pays on Moderato
+  build:
+    name: build bx402
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        # One entry per MPP client, each backed by a matching
-        # .github/scripts/mpp-pay-<client>.sh. mppx is the primary client;
-        # tempo request and agentcash join once verified against Moderato.
-        client: [mppx]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Show toolchain
@@ -43,13 +36,36 @@ jobs:
           shared-key: build
       - name: Build
         run: cargo build --locked
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bx402-debug
+          path: target/debug/bx402
+          retention-days: 1
+
+  paid-search:
+    name: ${{ matrix.client }} pays on Moderato
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # One entry per MPP client, each backed by a matching
+        # .github/scripts/e2e/mpp/<client>.sh.
+        client: [mppx, tempo-request]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bx402-debug
       - name: Start bx402 against Moderato
         env:
           BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
           X402_FACILITATOR_URL: http://facilitator.invalid
           ALLOW_TESTNET: "true"
         run: |
-          MPP_SECRET_KEY=$(openssl rand -hex 32) ./target/debug/bx402 > server.log 2>&1 &
+          chmod +x bx402
+          MPP_SECRET_KEY=$(openssl rand -hex 32) ./bx402 > server.log 2>&1 &
           for _ in $(seq 1 30); do
             curl -sf -o /dev/null http://localhost:8080/health && exit 0
             sleep 1
@@ -57,7 +73,7 @@ jobs:
           echo "server never became healthy" >&2
           exit 1
       - name: Pay for a search
-        run: bash .github/scripts/mpp-pay-${{ matrix.client }}.sh
+        run: bash .github/scripts/e2e/mpp/${{ matrix.client }}.sh
       - name: Show logs
         if: failure()
         run: |
