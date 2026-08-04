@@ -9,7 +9,6 @@
 //! * **collision** (both rails at once): rejected with `400`
 
 use axum::{
-    Json,
     extract::{Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
@@ -44,20 +43,23 @@ fn classify(headers: &HeaderMap) -> Rail {
     }
 }
 
-/// Build the cold `402` from the rails' challenges:
+/// Build the cold `402` from the rails' challenges, one header each, minted
+/// fresh for this request. The body stays empty, since V2 clients read only
+/// the headers:
 ///
-/// * x402: the V2 payment requirements, echoing `resource` (the requested
-///   endpoint) back to the client. Served as the JSON body and again in the
-///   `Payment-Required` header, since some V2 clients read only the header.
-/// * MPP: the `WWW-Authenticate: Payment` challenge header, minted fresh for
-///   each `402` (omitted if it cannot be built).
+/// * x402: the V2 payment requirements in `Payment-Required`, echoing
+///   `resource` (the requested endpoint) back to the client.
+/// * MPP: the `WWW-Authenticate: Payment` challenge.
+///
+/// A rail that cannot produce its challenge is left out, so the `402` still
+/// advertises whatever the other rail offers.
 fn cold_402(ctx: &Context, resource: &str) -> Response {
-    let challenge = x402::challenge(&ctx.x402, resource);
-    let header = x402::challenge_header(&challenge);
-    let mut response = (StatusCode::PAYMENT_REQUIRED, Json(challenge)).into_response();
-    // A rail that cannot produce its challenge is left out, so the 402 still
-    // advertises whatever the other rail offers.
-    for (name, value) in [header, mpp::challenge(&ctx.mpp)].into_iter().flatten() {
+    let mut response = StatusCode::PAYMENT_REQUIRED.into_response();
+    let challenges = [
+        x402::challenge(&ctx.x402, resource),
+        mpp::challenge(&ctx.mpp),
+    ];
+    for (name, value) in challenges.into_iter().flatten() {
         response.headers_mut().insert(name, value);
     }
     response
@@ -235,13 +237,19 @@ mod tests {
             .unwrap();
         assert!(challenge.starts_with("Payment "));
 
-        // x402 rail: V2 payment requirements in the `Payment-Required` header
-        // and as a JSON body.
-        assert!(response.headers().contains_key("payment-required"));
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let requirements: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // x402 rail: V2 payment requirements in the `Payment-Required` header.
+        let requirements = x402::decode_challenge(
+            response
+                .headers()
+                .get("payment-required")
+                .expect("the x402 challenge is advertised"),
+        );
         assert_eq!(requirements["x402Version"], 2);
         assert!(requirements["accepts"].is_array());
+
+        // The body carries nothing, V2 clients read only the headers.
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty());
     }
 
     /// Build a request carrying `headers`, for exercising `absolute_uri`.

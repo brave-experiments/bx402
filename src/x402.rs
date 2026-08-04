@@ -83,11 +83,14 @@ fn endpoint_description(path: &str) -> &'static str {
     }
 }
 
-/// x402's part of the cold `402`: the V2 `PaymentRequired` envelope for `resource`.
-pub(crate) fn challenge(client: &Client, resource: &str) -> Value {
+/// x402's part of the cold `402`: the V2 `PaymentRequired` envelope for
+/// `resource`, base64 encoded into the `Payment-Required` header, the V2
+/// transport clients read. `None` if it cannot be encoded, leaving the `402`
+/// advertising MPP alone.
+pub(crate) fn challenge(client: &Client, resource: &str) -> Option<(HeaderName, HeaderValue)> {
     let uri = resource.parse::<Uri>().ok();
     let path = uri.as_ref().map(|u| u.path()).unwrap_or(resource);
-    let body = v2::PaymentRequired {
+    let envelope = v2::PaymentRequired {
         x402_version: v2::X402Version2,
         error: Some(PAYMENT_REQUIRED.to_string()),
         resource: Some(v2::ResourceInfo {
@@ -98,18 +101,10 @@ pub(crate) fn challenge(client: &Client, resource: &str) -> Value {
         accepts: client.accepts.clone(),
         extensions: Default::default(),
     };
-    serde_json::to_value(body).unwrap_or_else(|err| {
-        tracing::error!(error = %err, "x402 challenge could not be serialized");
-        json!({ "error": PAYMENT_REQUIRED })
-    })
-}
-
-/// The `Payment-Required` header carrying `challenge`'s envelope base64-encoded,
-/// for V2 clients that read the header and never the body. `None` if the value
-/// cannot be encoded, leaving the `402` body-only.
-pub(crate) fn challenge_header(challenge: &Value) -> Option<(HeaderName, HeaderValue)> {
-    let encoded = Base64Bytes::encode(challenge.to_string());
-    let Ok(value) = HeaderValue::from_str(&encoded.to_string()) else {
+    let value = serde_json::to_vec(&envelope)
+        .ok()
+        .and_then(|bytes| HeaderValue::from_str(&Base64Bytes::encode(&bytes).to_string()).ok());
+    let Some(value) = value else {
         tracing::error!("x402 challenge could not be encoded as a header");
         return None;
     };
@@ -211,8 +206,7 @@ pub(crate) async fn handle(
     }
 }
 
-/// The error line every cold `402` carries, in the envelope and in the
-/// fallback body alike.
+/// The error line every cold `402` envelope carries.
 const PAYMENT_REQUIRED: &str = "Payment required";
 
 /// Shared message for a payment we could not read at all, whether the header,
@@ -330,6 +324,17 @@ pub(crate) fn test_payment_signature(config: &Config, payload: Value) -> String 
     Base64Bytes::encode(body.to_string()).to_string()
 }
 
+/// Decode a base64 `Payment-Required` challenge header back to JSON, the
+/// test-side inverse of [`challenge`], so the crate's tests read challenges
+/// through this module too.
+#[cfg(test)]
+pub(crate) fn decode_challenge(value: &HeaderValue) -> Value {
+    let bytes = Base64Bytes::from(value.as_bytes())
+        .decode()
+        .expect("challenge is valid base64");
+    serde_json::from_slice(&bytes).expect("challenge is JSON")
+}
+
 /// Decode a base64 `Payment-Response` receipt back to JSON, the test-side inverse of
 /// [`attach_receipt`], so the crate's tests read receipts through this module too.
 #[cfg(test)]
@@ -398,7 +403,10 @@ mod tests {
         // Every offer field is spelled out so an upstream change to the SDK's
         // consts fails here instead of silently moving the charge.
         let client = client(&Config::for_tests()).unwrap();
-        let body = challenge(&client, "https://bx402.example.com/res/v1/web/search");
+        let (name, value) = challenge(&client, "https://bx402.example.com/res/v1/web/search")
+            .expect("the challenge builds");
+        assert_eq!(name, PAYMENT_REQUIRED_HEADER);
+        let body = decode_challenge(&value);
 
         let expected = json!({
             "x402Version": 2,
@@ -439,18 +447,5 @@ mod tests {
         });
 
         assert_eq!(body, expected);
-    }
-
-    #[test]
-    fn the_challenge_rides_in_the_payment_required_header_too() {
-        let client = client(&Config::for_tests()).unwrap();
-        let body = challenge(&client, "https://bx402.example.com/res/v1/web/search");
-
-        let (name, value) = challenge_header(&body).expect("the header builds");
-        assert_eq!(name, PAYMENT_REQUIRED_HEADER);
-
-        let decoded = Base64Bytes::from(value.as_bytes()).decode().unwrap();
-        let round_trip: Value = serde_json::from_slice(&decoded).unwrap();
-        assert_eq!(round_trip, body);
     }
 }
