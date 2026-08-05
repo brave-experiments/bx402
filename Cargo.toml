@@ -39,7 +39,7 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["default-htt
 # Defaults are fine here: aws-config already uses the modern default-https-client, not the
 # legacy rustls connector, so no vulnerable TLS stack.
 aws-config = "1"
-base64 = "0.22"
+base64 = "0.23"
 
 [dev-dependencies]
 http-body-util = "=0.1.4"
