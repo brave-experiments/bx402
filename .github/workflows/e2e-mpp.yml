@@ -53,23 +53,11 @@ jobs:
         client: [mppx, tempo-request]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: ./.github/actions/start-bx402
         with:
-          name: bx402-debug
-      - name: Start bx402 against Moderato
-        env:
-          BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
-          X402_FACILITATOR_URL: http://facilitator.invalid
-          ALLOW_TESTNET: "true"
-        run: |
-          chmod +x bx402
-          MPP_SECRET_KEY=$(openssl rand -hex 32) ./bx402 > server.log 2>&1 &
-          for _ in $(seq 1 30); do
-            curl -sf -o /dev/null http://localhost:8080/health && exit 0
-            sleep 1
-          done
-          echo "server never became healthy" >&2
-          exit 1
+          brave-search-api-key: ${{ secrets.BRAVE_SEARCH_API_KEY }}
+          # The x402 rail is undriven here, so any parseable URL satisfies startup.
+          x402-facilitator-url: http://facilitator.invalid
       - name: Pay for a search
         run: bash .github/scripts/e2e/mpp/${{ matrix.client }}.sh
       - name: Show logs
