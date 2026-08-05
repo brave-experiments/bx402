@@ -1,0 +1,67 @@
+name: e2e-x402
+
+on:
+  # No push trigger: each passing leg spends a Brave search from the free tier.
+  # The daily run catches client releases between dispatches.
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never overlap paid runs, and never cancel one mid-payment.
+concurrency:
+  group: e2e-x402
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # The server discovers the MPP chain at startup even when only x402 is driven.
+  MPP_RPC_URL: https://rpc.moderato.tempo.xyz
+
+jobs:
+  build:
+    name: build bx402
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Show toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: build
+      - name: Build
+        run: cargo build --locked
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bx402-debug
+          path: target/debug/bx402
+          retention-days: 1
+
+  paid-search:
+    name: ${{ matrix.client }} pays on Base Sepolia
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        client: [purl]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: ./.github/actions/start-bx402
+        with:
+          brave-search-api-key: ${{ secrets.BRAVE_SEARCH_API_KEY }}
+          x402-facilitator-url: https://facilitator.x402.rs
+      - name: Pay for a search
+        env:
+          X402_PAYER_PRIVATE_KEY: ${{ secrets.X402_PAYER_PRIVATE_KEY }}
+        run: bash .github/scripts/e2e/x402/${{ matrix.client }}.sh
+      - name: Show logs
+        if: failure()
+        run: |
+          cat server.log || true
+          cat client.log || true
