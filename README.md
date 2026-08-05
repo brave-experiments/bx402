@@ -68,6 +68,60 @@ payment on chain.
    header, but purl does not print it. Read it from the facilitator logs instead,
    then look it up on [sepolia.basescan.org](https://sepolia.basescan.org).
 
+## Paying for a search on Tempo Moderato
+
+No facilitator and no sidecar here: the server talks to a Tempo RPC endpoint directly, and
+verifying an MPP credential is what settles it. Only the payer needs funding.
+
+1. Write the config to `.env` and start the server (`ALLOW_TESTNET` is required because
+   Moderato is a testnet):
+   ```sh
+   echo "BRAVE_SEARCH_API_KEY=<your-key>" >> .env
+   echo "MPP_RPC_URL=https://rpc.moderato.tempo.xyz" >> .env
+   echo "MPP_SECRET_KEY=$(openssl rand -hex 32)" >> .env
+   echo "ALLOW_TESTNET=true" >> .env
+   cargo run
+   ```
+2. Create a throwaway payer and fund it from the faucet RPC method:
+   ```sh
+   export MPPX_PRIVATE_KEY="0x$(openssl rand -hex 32)"
+   curl -s -X POST https://rpc.moderato.tempo.xyz -H 'content-type: application/json' \
+     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tempo_fundAddress\",\"params\":[\"<payer>\"]}"
+   ```
+   `new_payer` in [`.github/scripts/e2e/mpp/lib.sh`](.github/scripts/e2e/mpp/lib.sh) does
+   this end to end, deriving the address and waiting for the balance to land.
+3. Pay for a search:
+   ```sh
+   npx mppx --network testnet -i 'http://localhost:8080/res/v1/web/search?q=rust'
+   ```
+   MPP clients print the `Payment-Receipt` header, so look the transaction up on
+   [explore.tempo.xyz](https://explore.tempo.xyz).
+
+## Networks
+
+Both rails charge 5000 base units (0.005 of a six decimal token) to the same treasury.
+
+| Rail | Mainnet             | Testnet                      | Asset   |
+| ---- | ------------------- | ---------------------------- | ------- |
+| x402 | Base, `eip155:8453` | Base Sepolia, `eip155:84532` | USDC    |
+| MPP  | Tempo, chain 4217   | Moderato, chain 42431        | pathUSD |
+
+`ALLOW_TESTNET=true` admits testnets. x402 then advertises the Base Sepolia offer first, so
+a client taking the first offer it supports pays with faucet money. MPP discovers its chain
+from `MPP_RPC_URL` at startup and refuses to start on a testnet without the variable.
+
+x402 verifies (a dry run that moves nothing), runs the search, then settles, so a failed
+search is never charged and a returned result always means the payment settled. An MPP
+credential is a signed transaction, so verifying it settles it, before the search runs.
+
+## End-to-end tests
+
+| Client                                                    | x402 (Base Sepolia) | MPP (Moderato) |
+| --------------------------------------------------------- | :-----------------: | :------------: |
+| [`purl`](https://github.com/stripe/purl)                  | ✅                  | —              |
+| [`mppx`](https://www.npmjs.com/package/mppx)              | —                   | ✅             |
+| [`tempo request`](https://github.com/tempoxyz/wallet-cli) | —                   | ✅             |
+
 ## Restricted-address screening
 
 The proxy can refuse payments from prohibited addresses by checking each payer against a
