@@ -47,6 +47,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         # One entry per MPP client, each backed by a matching
         # .github/scripts/e2e/mpp/<client>.sh.
