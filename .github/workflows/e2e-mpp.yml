@@ -1,10 +1,8 @@
 name: e2e-mpp
 
 on:
-  # Every push plus a daily heartbeat that catches client releases between
-  # pushes. Each run bills one successful Brave search per client, so the
-  # daily cron keeps the combined rate inside the free tier.
-  push:
+  # No push trigger: each passing leg spends a Brave search from the free tier.
+  # The daily run catches client releases between dispatches.
   schedule:
     - cron: "30 2 * * *"
   workflow_dispatch:
