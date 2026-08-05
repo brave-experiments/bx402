@@ -21,7 +21,10 @@ payer_setup
   --password e2e-throwaway --set-active true
 
 FROM_BLOCK=$(settlement_cursor)
-./purl --yes --output json "$URL" > response.txt 2> client.log
+# The password is needed again here, to decrypt the keystore: without it purl
+# prompts and dies the same way. --output-format sets the response encoding,
+# where --output would write the response to a file of that name instead.
+PURL_PASSWORD=e2e-throwaway ./purl --output-format json "$URL" > response.txt 2> client.log
 python3 - response.txt <<'EOF'
 import json, sys
 
