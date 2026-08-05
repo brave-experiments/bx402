@@ -66,3 +66,6 @@ jobs:
         run: |
           cat server.log || true
           cat client.log || true
+          # The status line and headers the client saw, which is the only place a
+          # rejected payment or a non-200 from Brave Search shows up.
+          cat response.txt || true
