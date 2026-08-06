@@ -14,7 +14,10 @@ echo "@x402/fetch version: $CLIENT_VERSION"
 payer_setup
 
 FROM_BLOCK=$(settlement_cursor)
-PAYER_KEY="$PAYER_KEY" URL="$URL" node "$(dirname "$0")/x402-fetch.js" 2> client.log
+# The .mjs extension is load-bearing: the repo has no package.json declaring
+# "type": "module", so a .js file only parses as an ES module on Node 22.7 and
+# newer, where syntax detection is on by default.
+PAYER_KEY="$PAYER_KEY" URL="$URL" node "$(dirname "$0")/x402-fetch.mjs" 2> client.log
 python3 - response.txt <<'EOF'
 import json, sys
 
