@@ -106,16 +106,20 @@ pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Nex
     }
 }
 
-/// Reconstruct the absolute URL the client requested (`scheme://host/path`, no
-/// query string) for the cold `402`'s `resource`. The query is dropped so the
-/// resource names the endpoint, not one specific query; a request with no host
-/// gets the bare path.
+/// Reconstruct the absolute URL the client requested for the cold `402`'s
+/// `resource`. The query is kept verbatim, so the resource names the exact
+/// request: clients compare it against the URL they asked for, and it is folded
+/// into the payment's route binding. A request with no host gets the bare path
+/// and query.
 fn absolute_uri(req: &Request) -> String {
-    let path = req.uri().path();
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map_or(req.uri().path(), |target| target.as_str());
     let Some(host) = host(req) else {
-        return path.to_string();
+        return path_and_query.to_string();
     };
-    format!("{}://{host}{path}", scheme(req))
+    format!("{}://{host}{path_and_query}", scheme(req))
 }
 
 /// The host the client addressed: the `Host` header when non-empty, else the
@@ -262,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn absolute_uri_uses_forwarded_proto_and_host_and_drops_query() {
+    fn absolute_uri_uses_forwarded_proto_and_host_and_keeps_query() {
         let req = request_with(
             "/res/v1/web/search?q=rust",
             &[
@@ -272,14 +276,29 @@ mod tests {
         );
         assert_eq!(
             absolute_uri(&req),
-            "https://bx402.example.com/res/v1/web/search"
+            "https://bx402.example.com/res/v1/web/search?q=rust"
         );
     }
 
     #[test]
-    fn absolute_uri_without_a_host_falls_back_to_the_path() {
+    fn absolute_uri_without_a_host_falls_back_to_the_path_and_query() {
         let req = request_with("/res/v1/web/search?q=rust", &[]);
-        assert_eq!(absolute_uri(&req), "/res/v1/web/search");
+        assert_eq!(absolute_uri(&req), "/res/v1/web/search?q=rust");
+    }
+
+    #[test]
+    fn absolute_uri_repeats_the_query_byte_for_byte() {
+        // Clients compare this against the URL they requested, so the query has to
+        // come back exactly as sent. Re-encoding `+` as `%2B` (or the reverse) would
+        // break that comparison.
+        let req = request_with(
+            "/res/v1/web/search?q=base+sepolia&count=2",
+            &[("host", "localhost:8080")],
+        );
+        assert_eq!(
+            absolute_uri(&req),
+            "http://localhost:8080/res/v1/web/search?q=base+sepolia&count=2"
+        );
     }
 
     #[test]

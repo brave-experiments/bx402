@@ -484,9 +484,9 @@ mod tests {
 
     #[tokio::test]
     async fn cold_402_advertises_the_absolute_request_url_as_resource() {
-        // End-to-end: a cold request through the real router must echo the endpoint
-        // it hit back as `resource.url`, built from the proxy headers (scheme from
-        // `X-Forwarded-Proto`, host from `Host`) with the query stripped.
+        // End-to-end: a cold request through the real router must echo back the exact
+        // URL it hit as `resource.url`, built from the proxy headers (scheme from
+        // `X-Forwarded-Proto`, host from `Host`) with the query kept.
         let request = Request::builder()
             .uri("/res/v1/web/search?q=rust")
             .header("host", "api.bx402.io")
@@ -508,7 +508,7 @@ mod tests {
         );
         assert_eq!(
             challenge["resource"]["url"],
-            "https://api.bx402.io/res/v1/web/search"
+            "https://api.bx402.io/res/v1/web/search?q=rust"
         );
     }
 
