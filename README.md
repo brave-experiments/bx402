@@ -94,8 +94,8 @@ verifying an MPP credential is what settles it. Only the payer needs funding.
    ```sh
    npx mppx --network testnet -i 'http://localhost:8080/res/v1/web/search?q=rust'
    ```
-   MPP clients print the `Payment-Receipt` header, so look the transaction up on
-   [explore.tempo.xyz](https://explore.tempo.xyz).
+   MPP clients print the `Payment-Receipt` header, so look the transaction up at
+   `https://explore.testnet.tempo.xyz/receipt/<transaction>`.
 
 ## Networks
 
