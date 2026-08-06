@@ -5,7 +5,7 @@
 
 use axum::{
     extract::Request,
-    http::{HeaderMap, HeaderValue, StatusCode, Uri, header::HeaderName},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header::HeaderName},
     middleware::Next,
     response::Response,
 };
@@ -47,6 +47,9 @@ const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
 /// One rate for every request today; pricing may later vary by endpoint or by rail.
 const PRICE_USDC_BASE_UNITS: u64 = 5_000;
 
+/// Extension key naming mppx's route binding.
+const MPPX_EXTENSION: &str = "mppx";
+
 /// Returns `true` if the request carries an x402 V2 payment proof.
 pub(crate) fn has_payment(headers: &HeaderMap) -> bool {
     headers.contains_key(V2_PAYMENT_HEADER)
@@ -75,6 +78,35 @@ fn accepts(config: &Config) -> Result<Vec<v2::PaymentRequirements>, AppError> {
     Ok(accepts)
 }
 
+/// The route binding mppx expects in the challenge, keyed by the name it reads.
+///
+/// mppx binds an authorization to the route it was issued for and refuses to sign
+/// without this entry. It folds the whole extensions object into the EIP-3009
+/// nonce, so what matters to a payer is that the entry is present and that
+/// `info.method` is the method it will send. The schema is declared for clients
+/// that check the shape; mppx itself does not.
+fn route_extensions(method: &Method) -> v2::ExtensionsJson {
+    [(
+        MPPX_EXTENSION.to_string(),
+        json!({
+            "info": { "method": method.as_str() },
+            "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["method"],
+                "properties": {
+                    "method": { "type": "string" },
+                    "nonce": { "type": "string" },
+                    "digest": { "type": "string" },
+                    "opaque": { "type": "string" },
+                },
+            },
+        }),
+    )]
+    .into_iter()
+    .collect()
+}
+
 /// Label for each paid endpoint, keyed by request path.
 fn endpoint_description(path: &str) -> &'static str {
     match path {
@@ -87,7 +119,11 @@ fn endpoint_description(path: &str) -> &'static str {
 /// `resource`, base64 encoded into the `Payment-Required` header, the V2
 /// transport clients read. `None` if it cannot be encoded, leaving the `402`
 /// advertising MPP alone.
-pub(crate) fn challenge(client: &Client, resource: &str) -> Option<(HeaderName, HeaderValue)> {
+pub(crate) fn challenge(
+    client: &Client,
+    resource: &str,
+    method: &Method,
+) -> Option<(HeaderName, HeaderValue)> {
     let uri = resource.parse::<Uri>().ok();
     let path = uri.as_ref().map(|u| u.path()).unwrap_or(resource);
     let envelope = v2::PaymentRequired {
@@ -99,7 +135,7 @@ pub(crate) fn challenge(client: &Client, resource: &str) -> Option<(HeaderName, 
             mime_type: Some("application/json".to_string()),
         }),
         accepts: client.accepts.clone(),
-        extensions: Default::default(),
+        extensions: route_extensions(method),
     };
     let value = serde_json::to_vec(&envelope)
         .ok()
@@ -403,8 +439,12 @@ mod tests {
         // Every offer field is spelled out so an upstream change to the SDK's
         // consts fails here instead of silently moving the charge.
         let client = client(&Config::for_tests()).unwrap();
-        let (name, value) = challenge(&client, "https://bx402.example.com/res/v1/web/search")
-            .expect("the challenge builds");
+        let (name, value) = challenge(
+            &client,
+            "https://bx402.example.com/res/v1/web/search?q=rust",
+            &Method::GET,
+        )
+        .expect("the challenge builds");
         assert_eq!(name, PAYMENT_REQUIRED_HEADER);
         let body = decode_challenge(&value);
 
@@ -412,7 +452,7 @@ mod tests {
             "x402Version": 2,
             "error": "Payment required",
             "resource": {
-                "url": "https://bx402.example.com/res/v1/web/search",
+                "url": "https://bx402.example.com/res/v1/web/search?q=rust",
                 "description": "Brave Search API - Web / Search",
                 "mimeType": "application/json"
             },
@@ -443,7 +483,23 @@ mod tests {
                         "version": "2"
                     }
                 }
-            ]
+            ],
+            "extensions": {
+                "mppx": {
+                    "info": { "method": "GET" },
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["method"],
+                        "properties": {
+                            "method": { "type": "string" },
+                            "nonce": { "type": "string" },
+                            "digest": { "type": "string" },
+                            "opaque": { "type": "string" }
+                        }
+                    }
+                }
+            }
         });
 
         assert_eq!(body, expected);

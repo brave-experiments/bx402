@@ -10,7 +10,7 @@
 
 use axum::{
     extract::{Request, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -47,16 +47,16 @@ fn classify(headers: &HeaderMap) -> Rail {
 /// fresh for this request. The body stays empty, since V2 clients read only
 /// the headers:
 ///
-/// * x402: the V2 payment requirements in `Payment-Required`, echoing
-///   `resource` (the requested endpoint) back to the client.
+/// * x402: the V2 payment requirements in `Payment-Required`, echoing the
+///   requested `resource` and `method` back to the client.
 /// * MPP: the `WWW-Authenticate: Payment` challenge.
 ///
 /// A rail that cannot produce its challenge is left out, so the `402` still
 /// advertises whatever the other rail offers.
-fn cold_402(ctx: &Context, resource: &str) -> Response {
+fn cold_402(ctx: &Context, resource: &str, method: &Method) -> Response {
     let mut response = StatusCode::PAYMENT_REQUIRED.into_response();
     let challenges = [
-        x402::challenge(&ctx.x402, resource),
+        x402::challenge(&ctx.x402, resource, method),
         mpp::challenge(&ctx.mpp),
     ];
     for (name, value) in challenges.into_iter().flatten() {
@@ -99,7 +99,7 @@ pub(crate) async fn context(
 /// never how a rail verifies.
 pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Next) -> Response {
     match classify(req.headers()) {
-        Rail::None => cold_402(&ctx, &absolute_uri(&req)),
+        Rail::None => cold_402(&ctx, &absolute_uri(&req), req.method()),
         Rail::Both => collision_400(),
         Rail::X402 => x402::handle(ctx.x402, ctx.screener, req, next).await,
         Rail::Mpp => mpp::handle(ctx.mpp, ctx.screener, req, next).await,
@@ -229,7 +229,11 @@ mod tests {
             ..Config::for_tests()
         };
         let ctx = context(&config, None).await.unwrap();
-        let response = cold_402(&ctx, "https://bx402.example.com/res/v1/web/search");
+        let response = cold_402(
+            &ctx,
+            "https://bx402.example.com/res/v1/web/search?q=rust",
+            &Method::GET,
+        );
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
         // MPP rail: a `Payment` challenge in `WWW-Authenticate`.
@@ -250,6 +254,9 @@ mod tests {
         );
         assert_eq!(requirements["x402Version"], 2);
         assert!(requirements["accepts"].is_array());
+
+        // The route binding mppx needs before it will sign, naming the request's method.
+        assert_eq!(requirements["extensions"]["mppx"]["info"]["method"], "GET");
 
         // The body carries nothing, V2 clients read only the headers.
         let body = response.into_body().collect().await.unwrap().to_bytes();
