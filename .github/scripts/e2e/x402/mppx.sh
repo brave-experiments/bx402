@@ -16,7 +16,11 @@ echo "mppx version: $CLIENT_VERSION"
 payer_setup
 
 FROM_BLOCK=$(settlement_cursor)
-PAYER_KEY="$PAYER_KEY" URL="$URL" node "$(dirname "$0")/mppx.mjs" 2> client.log
+# Copied next to node_modules because node resolves bare imports from the
+# importing file's directory upward, not from the working directory, so running
+# it in place only works when the install landed in one of its parents.
+cp "$(dirname "$0")/mppx.mjs" .
+PAYER_KEY="$PAYER_KEY" URL="$URL" node ./mppx.mjs 2> client.log
 python3 - response.txt <<'EOF'
 import json, sys
 

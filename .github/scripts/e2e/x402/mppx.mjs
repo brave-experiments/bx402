@@ -4,6 +4,7 @@
 // response body where the shell leg asserts on it.
 import { writeFileSync } from 'node:fs';
 import { evm, Mppx } from 'mppx/client';
+import { Header } from 'mppx/x402';
 import { privateKeyToAccount } from 'viem/accounts';
 
 const account = privateKeyToAccount(process.env.PAYER_KEY);
@@ -35,7 +36,7 @@ console.log(`status: ${response.status}`);
 // Like @x402/fetch and unlike purl, this client surfaces the receipt header.
 const receipt = response.headers.get('payment-response');
 if (receipt) {
-  console.log(`receipt: ${receipt}`);
+  console.log(`receipt: ${JSON.stringify(Header.decodePaymentResponse(receipt))}`);
 }
 
 if (!response.ok) {
