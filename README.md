@@ -119,8 +119,15 @@ credential is a signed transaction, so verifying it settles it, before the searc
 | Client                                                    | x402 (Base Sepolia) | MPP (Moderato) |
 | --------------------------------------------------------- | :-----------------: | :------------: |
 | [`purl`](https://github.com/stripe/purl)                  | ✅                  | —              |
-| [`mppx`](https://www.npmjs.com/package/mppx)              | —                   | ✅             |
+| [`@x402/fetch`](https://www.npmjs.com/package/@x402/fetch) | ✅                  | —              |
+| [`mppx`](https://www.npmjs.com/package/mppx)              | ✅                  | ✅             |
 | [`tempo request`](https://github.com/tempoxyz/wallet-cli) | —                   | ✅             |
+
+mppx pays either rail. It reaches x402 through its own protocol adapter, which reads the
+`PAYMENT-REQUIRED` header and answers in `PAYMENT-SIGNATURE`, so that leg settles through the
+facilitator like any other x402 payment. Two things in the challenge exist for it: `resource.url`
+repeats the request URL exactly, and an `mppx` entry in `extensions` carries the route binding it
+requires before it will sign.
 
 ## Restricted-address screening
 
