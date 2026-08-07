@@ -19,7 +19,6 @@ new_payer
 export MPPX_PRIVATE_KEY="$PAYER_KEY"
 
 ./node_modules/.bin/mppx --network testnet -i "$URL" > response.txt 2> client.log
-grep -Eq "^HTTP/[0-9.]+ 200" response.txt
-echo "paid request returned 200"
+assert_http_200 response.txt
 
 verify_settlement response.txt

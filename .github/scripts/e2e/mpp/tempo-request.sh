@@ -30,7 +30,6 @@ new_payer
 export TEMPO_PRIVATE_KEY="$PAYER_KEY"
 
 ./tempo-request -i "$URL" > response.txt 2> client.log
-grep -q "^HTTP 200" response.txt
-echo "paid request returned 200"
+assert_http_200 response.txt
 
 verify_settlement response.txt

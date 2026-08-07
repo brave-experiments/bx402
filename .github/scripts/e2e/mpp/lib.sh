@@ -3,6 +3,7 @@
 #   rpc <method> <params-json>   a JSON-RPC call against the chain
 #   new_payer                    sets PAYER_KEY and PAYER_ADDR to a fresh
 #                                throwaway key, faucet-funded with pathUSD
+#   assert_http_200 <file>       asserts the captured response is a 200
 #   verify_settlement <file>     reads the payment-receipt header out of the
 #                                captured response and proves the referenced
 #                                transaction settled on chain
@@ -36,6 +37,14 @@ new_payer() {
     sleep 2
   done
   [ "$balance" -gt 0 ] || { echo "faucet never funded $PAYER_ADDR" >&2; return 1; }
+}
+
+# Clients echo the status line differently: mppx keeps the wire form
+# "HTTP/1.1 200 OK", tempo request collapses it to "HTTP 200".
+assert_http_200() {
+  grep -Eq "^HTTP(/[0-9.]+)? 200" "$1" \
+    || { echo "the paid request did not return 200" >&2; return 1; }
+  echo "paid request returned 200"
 }
 
 verify_settlement() {
