@@ -125,9 +125,8 @@ credential is a signed transaction, so verifying it settles it, before the searc
 
 mppx pays either rail. It reaches x402 through its own protocol adapter, which reads the
 `PAYMENT-REQUIRED` header and answers in `PAYMENT-SIGNATURE`, so that leg settles through the
-facilitator like any other x402 payment. Two things in the challenge exist for it: `resource.url`
-repeats the request URL exactly, and an `mppx` entry in `extensions` carries the route binding it
-requires before it will sign.
+facilitator like any other x402 payment. The `mppx` entry in `extensions` carries the route
+binding it requires before it will sign.
 
 ## Restricted-address screening
 

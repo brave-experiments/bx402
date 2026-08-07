@@ -107,19 +107,18 @@ pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Nex
 }
 
 /// Reconstruct the absolute URL the client requested for the cold `402`'s
-/// `resource`. The query is kept verbatim, so the resource names the exact
-/// request: clients compare it against the URL they asked for, and it is folded
-/// into the payment's route binding. A request with no host gets the bare path
-/// and query.
+/// `resource`. The query is kept verbatim, because a client compares this against
+/// the URL it asked for and will not pay a challenge naming a different one. A
+/// request with no host gets the bare path and query.
 fn absolute_uri(req: &Request) -> String {
-    let path_and_query = req
+    let target = req
         .uri()
         .path_and_query()
-        .map_or(req.uri().path(), |target| target.as_str());
+        .map_or("/", |target| target.as_str());
     let Some(host) = host(req) else {
-        return path_and_query.to_string();
+        return target.to_string();
     };
-    format!("{}://{host}{path_and_query}", scheme(req))
+    format!("{}://{host}{target}", scheme(req))
 }
 
 /// The host the client addressed: the `Host` header when non-empty, else the
@@ -255,8 +254,9 @@ mod tests {
         assert_eq!(requirements["x402Version"], 2);
         assert!(requirements["accepts"].is_array());
 
-        // The route binding mppx needs before it will sign, naming the request's method.
-        assert_eq!(requirements["extensions"]["mppx"]["info"]["method"], "GET");
+        // The route binding mppx needs before it will sign. The method it carries is
+        // asserted through the real router in `lib.rs`, where the request supplies it.
+        assert!(requirements["extensions"]["mppx"]["info"].is_object());
 
         // The body carries nothing, V2 clients read only the headers.
         let body = response.into_body().collect().await.unwrap().to_bytes();
@@ -273,47 +273,57 @@ mod tests {
     }
 
     #[test]
-    fn absolute_uri_uses_forwarded_proto_and_host_and_keeps_query() {
-        let req = request_with(
-            "/res/v1/web/search?q=rust",
-            &[
-                ("host", "bx402.example.com"),
-                ("x-forwarded-proto", "https"),
-            ],
-        );
-        assert_eq!(
-            absolute_uri(&req),
-            "https://bx402.example.com/res/v1/web/search?q=rust"
-        );
-    }
-
-    #[test]
-    fn absolute_uri_without_a_host_falls_back_to_the_path_and_query() {
-        let req = request_with("/res/v1/web/search?q=rust", &[]);
-        assert_eq!(absolute_uri(&req), "/res/v1/web/search?q=rust");
-    }
-
-    #[test]
-    fn absolute_uri_repeats_the_query_byte_for_byte() {
-        // Clients compare this against the URL they requested, so the query has to
-        // come back exactly as sent. Re-encoding `+` as `%2B` (or the reverse) would
-        // break that comparison.
-        let req = request_with(
-            "/res/v1/web/search?q=base+sepolia&count=2",
-            &[("host", "localhost:8080")],
-        );
-        assert_eq!(
-            absolute_uri(&req),
-            "http://localhost:8080/res/v1/web/search?q=base+sepolia&count=2"
-        );
-    }
-
-    #[test]
-    fn absolute_uri_defaults_scheme_to_http() {
-        let req = request_with("/res/v1/web/search", &[("host", "localhost:8080")]);
-        assert_eq!(
-            absolute_uri(&req),
-            "http://localhost:8080/res/v1/web/search"
-        );
+    fn absolute_uri_rebuilds_the_requested_url() {
+        struct Case {
+            name: &'static str,
+            uri: &'static str,
+            headers: Vec<(&'static str, &'static str)>,
+            expected: &'static str,
+        }
+        let cases = [
+            Case {
+                name: "forwarded proto and host, query kept",
+                uri: "/res/v1/web/search?q=rust",
+                headers: vec![
+                    ("host", "bx402.example.com"),
+                    ("x-forwarded-proto", "https"),
+                ],
+                expected: "https://bx402.example.com/res/v1/web/search?q=rust",
+            },
+            Case {
+                name: "no host falls back to path and query",
+                uri: "/res/v1/web/search?q=rust",
+                headers: vec![],
+                expected: "/res/v1/web/search?q=rust",
+            },
+            // A client refuses to pay a challenge naming a different URL than it
+            // asked for, so the query comes back exactly as sent. Re-encoding `+`
+            // as `%2B` (or the reverse) would break that comparison.
+            Case {
+                name: "query repeated byte for byte",
+                uri: "/res/v1/web/search?q=base+sepolia&count=2",
+                headers: vec![("host", "localhost:8080")],
+                expected: "http://localhost:8080/res/v1/web/search?q=base+sepolia&count=2",
+            },
+            Case {
+                name: "scheme defaults to http",
+                uri: "/res/v1/web/search",
+                headers: vec![("host", "localhost:8080")],
+                expected: "http://localhost:8080/res/v1/web/search",
+            },
+        ];
+        for Case {
+            name,
+            uri,
+            headers,
+            expected,
+        } in cases
+        {
+            assert_eq!(
+                absolute_uri(&request_with(uri, &headers)),
+                expected,
+                "case: {name}"
+            );
+        }
     }
 }

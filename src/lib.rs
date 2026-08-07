@@ -512,6 +512,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cold_402_names_the_request_method_in_the_route_binding() {
+        // The method reaches the challenge from the request, not from a constant, so
+        // it is asserted with a non-GET method that only the router can supply.
+        let request = Request::builder()
+            .method("POST")
+            .uri("/res/v1/web/search?q=rust")
+            .body(Body::empty())
+            .unwrap();
+        let response = test_app(test_config("http://upstream.invalid".to_string()), None)
+            .await
+            .oneshot(request)
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let challenge = x402::decode_challenge(
+            response
+                .headers()
+                .get("payment-required")
+                .expect("the x402 challenge is advertised"),
+        );
+        assert_eq!(challenge["extensions"]["mppx"]["info"]["method"], "POST");
+    }
+
     /// Build a `GET /res/v1/web/search?q=rust` carrying a decodable x402 payment proof.
     fn paid_request() -> Request<Body> {
         Request::builder()

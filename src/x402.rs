@@ -47,9 +47,6 @@ const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
 /// One rate for every request today; pricing may later vary by endpoint or by rail.
 const PRICE_USDC_BASE_UNITS: u64 = 5_000;
 
-/// Extension key naming mppx's route binding.
-const MPPX_EXTENSION: &str = "mppx";
-
 /// Returns `true` if the request carries an x402 V2 payment proof.
 pub(crate) fn has_payment(headers: &HeaderMap) -> bool {
     headers.contains_key(V2_PAYMENT_HEADER)
@@ -78,29 +75,18 @@ fn accepts(config: &Config) -> Result<Vec<v2::PaymentRequirements>, AppError> {
     Ok(accepts)
 }
 
-/// The route binding mppx expects in the challenge, keyed by the name it reads.
+/// The route binding mppx needs before it will sign, under the key it reads.
 ///
-/// mppx binds an authorization to the route it was issued for and refuses to sign
-/// without this entry. It folds the whole extensions object into the EIP-3009
-/// nonce, so what matters to a payer is that the entry is present and that
-/// `info.method` is the method it will send. The schema is declared for clients
-/// that check the shape; mppx itself does not.
+/// * Both members are required: dropping either fails the payment with
+///   "requires route binding", even though nothing reads inside `schema`.
+/// * We do not verify the binding. It only feeds the client's nonce, and the
+///   facilitator is what checks the signature.
 fn route_extensions(method: &Method) -> v2::ExtensionsJson {
     [(
-        MPPX_EXTENSION.to_string(),
+        "mppx".to_string(),
         json!({
             "info": { "method": method.as_str() },
-            "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["method"],
-                "properties": {
-                    "method": { "type": "string" },
-                    "nonce": { "type": "string" },
-                    "digest": { "type": "string" },
-                    "opaque": { "type": "string" },
-                },
-            },
+            "schema": { "type": "object" },
         }),
     )]
     .into_iter()
@@ -137,9 +123,10 @@ pub(crate) fn challenge(
         accepts: client.accepts.clone(),
         extensions: route_extensions(method),
     };
+    // `try_from` takes the String by value, so the envelope moves into the header.
     let value = serde_json::to_vec(&envelope)
         .ok()
-        .and_then(|bytes| HeaderValue::from_str(&Base64Bytes::encode(&bytes).to_string()).ok());
+        .and_then(|bytes| HeaderValue::try_from(Base64Bytes::encode(&bytes).to_string()).ok());
     let Some(value) = value else {
         tracing::error!("x402 challenge could not be encoded as a header");
         return None;
@@ -487,17 +474,7 @@ mod tests {
             "extensions": {
                 "mppx": {
                     "info": { "method": "GET" },
-                    "schema": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["method"],
-                        "properties": {
-                            "method": { "type": "string" },
-                            "nonce": { "type": "string" },
-                            "digest": { "type": "string" },
-                            "opaque": { "type": "string" }
-                        }
-                    }
+                    "schema": { "type": "object" }
                 }
             }
         });
