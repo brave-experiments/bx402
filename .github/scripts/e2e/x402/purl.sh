@@ -25,12 +25,5 @@ FROM_BLOCK=$(settlement_cursor)
 # prompts and dies the same way. --output-format sets the response encoding,
 # where --output would write the response to a file of that name instead.
 PURL_PASSWORD=e2e-throwaway ./purl --output-format json "$URL" > response.txt 2> client.log
-python3 - response.txt <<'EOF'
-import json, sys
-
-body = json.load(open(sys.argv[1]))
-assert body.get("type") == "search", list(body)[:5]
-print("paid request returned the search body")
-EOF
-
+assert_search_body response.txt
 verify_settlement "$FROM_BLOCK"

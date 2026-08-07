@@ -4,6 +4,9 @@
 #                                X402_PAYER_PRIVATE_KEY into PAYER_KEY and
 #                                PAYER_ADDR and asserts it can cover the price
 #   settlement_cursor            the block to search from, captured before paying
+#   npm_client_version <package> prints the installed version of an npm client
+#   run_node_client <script.mjs> runs a node client leg against URL as PAYER_KEY
+#   assert_search_body <file>    asserts the captured response is a search result
 #   verify_settlement <block>    finds the USDC transfer that paid for the search
 #                                and prints its transaction hash
 #
@@ -41,6 +44,27 @@ payer_setup() {
     echo "payer cannot cover the $PRICE price, refill it at faucet.circle.com" >&2
     return 1
   }
+}
+
+# Read the file: some packages do not export ./package.json.
+npm_client_version() {
+  echo "$1 version: $(node -p "JSON.parse(require('fs').readFileSync('node_modules/$1/package.json')).version")"
+}
+
+# Copied beside node_modules, which is where node resolves its imports from.
+run_node_client() {
+  cp "$(dirname "${BASH_SOURCE[0]}")/$1" .
+  PAYER_KEY="$PAYER_KEY" URL="$URL" node "./$1" 2> client.log
+}
+
+assert_search_body() {
+  python3 - "$1" <<'EOF'
+import json, sys
+
+body = json.load(open(sys.argv[1]))
+assert body.get("type") == "search", list(body)[:5]
+print("paid request returned the search body")
+EOF
 }
 
 topic_addr() {
