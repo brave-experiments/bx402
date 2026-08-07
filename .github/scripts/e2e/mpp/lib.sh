@@ -65,4 +65,5 @@ EOF
   block=$(rpc eth_getTransactionReceipt "[\"$tx\"]" \
     | jq -re 'select(.result.status == "0x1") | .result.blockNumber')
   echo "settled on chain: $tx in block $((block))"
+  echo "  https://explore.testnet.tempo.xyz/receipt/$tx"
 }
