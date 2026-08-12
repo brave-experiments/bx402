@@ -108,8 +108,11 @@ pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Nex
 
 /// Reconstruct the absolute URL the client requested for the cold `402`'s
 /// `resource`. The query is kept verbatim, because a client compares this against
-/// the URL it asked for and will not pay a challenge naming a different one. A
-/// request with no host gets the bare path and query.
+/// the URL it asked for and will not pay a challenge naming a different one. The
+/// scheme and host are normalized the way URL parsers normalize the requested
+/// URL before that comparison (lowercased, default port dropped), so a client
+/// sending `Host: API.bx402.io:443` still recognizes the challenge as its own
+/// request. A request with no host gets the bare path and query.
 fn absolute_uri(req: &Request) -> String {
     let target = req
         .uri()
@@ -118,7 +121,21 @@ fn absolute_uri(req: &Request) -> String {
     let Some(host) = host(req) else {
         return target.to_string();
     };
-    format!("{}://{host}{target}", scheme(req))
+    let scheme = scheme(req).to_ascii_lowercase();
+    let host = normalized_host(host, &scheme);
+    format!("{scheme}://{host}{target}")
+}
+
+/// Lowercase `host` and drop the port when it is the scheme's default.
+fn normalized_host(host: &str, scheme: &str) -> String {
+    let default_port = match scheme {
+        "http" => ":80",
+        "https" => ":443",
+        _ => return host.to_ascii_lowercase(),
+    };
+    host.strip_suffix(default_port)
+        .unwrap_or(host)
+        .to_ascii_lowercase()
 }
 
 /// The host the client addressed: the `Host` header when non-empty, else the
@@ -310,6 +327,31 @@ mod tests {
                 uri: "/res/v1/web/search",
                 headers: vec![("host", "localhost:8080")],
                 expected: "http://localhost:8080/res/v1/web/search",
+            },
+            // A non-canonical `Host` comes back in the form URL parsers produce.
+            Case {
+                name: "host is lowercased",
+                uri: "/res/v1/web/search",
+                headers: vec![("host", "API.bx402.io"), ("x-forwarded-proto", "HTTPS")],
+                expected: "https://api.bx402.io/res/v1/web/search",
+            },
+            Case {
+                name: "default https port dropped",
+                uri: "/res/v1/web/search",
+                headers: vec![("host", "api.bx402.io:443"), ("x-forwarded-proto", "https")],
+                expected: "https://api.bx402.io/res/v1/web/search",
+            },
+            Case {
+                name: "default http port dropped",
+                uri: "/res/v1/web/search",
+                headers: vec![("host", "api.bx402.io:80")],
+                expected: "http://api.bx402.io/res/v1/web/search",
+            },
+            Case {
+                name: "non-default port kept",
+                uri: "/res/v1/web/search",
+                headers: vec![("host", "api.bx402.io:443")],
+                expected: "http://api.bx402.io:443/res/v1/web/search",
             },
         ];
         for Case {
