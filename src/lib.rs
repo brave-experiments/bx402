@@ -82,7 +82,10 @@ pub async fn app(
         .route("/health", get(health))
         .route(
             WEB_SEARCH_PATH,
-            get(search).layer(middleware::from_fn_with_state(context, dispatch::dispatch)),
+            // `route_layer` runs the dispatch gate only when the method matches, so
+            // an unsupported method gets the plain 405 instead of a payable 402
+            // whose search would then be refused.
+            get(search).route_layer(middleware::from_fn_with_state(context, dispatch::dispatch)),
         )
         // Span and log each request; failures log at `error`, so a 5xx is visible.
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -510,12 +513,14 @@ mod tests {
             challenge["resource"]["url"],
             "https://api.bx402.io/res/v1/web/search?q=rust"
         );
+        // The route binding names the method the request arrived with.
+        assert_eq!(challenge["extensions"]["mppx"]["info"]["method"], "GET");
     }
 
     #[tokio::test]
-    async fn cold_402_names_the_request_method_in_the_route_binding() {
-        // The method reaches the challenge from the request, not from a constant, so
-        // it is asserted with a non-GET method that only the router can supply.
+    async fn unsupported_method_is_405_not_a_payable_402() {
+        // The dispatch gate runs only for methods the route serves. A POST must get
+        // the plain 405, not a 402 challenge whose payment would buy a 405.
         let request = Request::builder()
             .method("POST")
             .uri("/res/v1/web/search?q=rust")
@@ -527,14 +532,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
-        let challenge = x402::decode_challenge(
-            response
-                .headers()
-                .get("payment-required")
-                .expect("the x402 challenge is advertised"),
-        );
-        assert_eq!(challenge["extensions"]["mppx"]["info"]["method"], "POST");
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert!(response.headers().get("payment-required").is_none());
     }
 
     /// Build a `GET /res/v1/web/search?q=rust` carrying a decodable x402 payment proof.
