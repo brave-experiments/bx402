@@ -88,8 +88,8 @@ pub(crate) async fn context(
     screener: Option<RestrictedAddressScreener>,
 ) -> Result<Context, AppError> {
     Ok(Context {
-        x402: x402::client(config)?,
-        mpp: mpp::client(config).await?,
+        x402: x402::client(&config.x402, config.allow_testnet)?,
+        mpp: mpp::client(&config.mpp, config.allow_testnet).await?,
         screener,
     })
 }
@@ -245,10 +245,7 @@ mod tests {
     #[tokio::test]
     async fn cold_402_advertises_both_rails() {
         let rpc = mpp::test_rpc().await;
-        let config = Config {
-            mpp_rpc_url: rpc.uri(),
-            ..Config::for_tests()
-        };
+        let config = Config::for_tests().with_mpp_rpc_url(rpc.uri());
         let ctx = context(&config, None).await.unwrap();
         let response = cold_402(
             &ctx,

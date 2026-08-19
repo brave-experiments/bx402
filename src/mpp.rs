@@ -28,7 +28,10 @@ use tempo_primitives::transaction::AASigned;
 
 use crate::error::json_error;
 use crate::screener::RestrictedAddressScreener;
-use crate::{AppError, Config};
+use crate::{AppError, config::MppConfig};
+
+#[cfg(test)]
+use crate::Config;
 
 /// The settlement receipt returns to the client in the `Payment-Receipt` response
 /// header, the dual of the `Authorization` request header.
@@ -96,8 +99,8 @@ pub(crate) struct Client {
 ///   every Tempo network, overriding the SDK default of USDC on mainnet.
 /// * An unreachable endpoint or an unusable `MPP_SECRET_KEY` is a startup
 ///   misconfiguration, surfaced as [`AppError`].
-pub(crate) async fn client(config: &Config) -> Result<Client, AppError> {
-    let chain_id = get_chain_id(&config.mpp_rpc_url).await?;
+pub(crate) async fn client(rail: &MppConfig, allow_testnet: bool) -> Result<Client, AppError> {
+    let chain_id = get_chain_id(&rail.rpc_url).await?;
     // Exhaustive so a new SDK network variant fails the build here, forcing
     // its testnet classification to be decided.
     let testnet = match TempoNetwork::from_chain_id(chain_id) {
@@ -109,7 +112,7 @@ pub(crate) async fn client(config: &Config) -> Result<Client, AppError> {
             )));
         }
     };
-    if testnet && !config.allow_testnet {
+    if testnet && !allow_testnet {
         return Err(AppError::InvalidConfig(format!(
             "MPP_RPC_URL: chain {chain_id} is a testnet; set ALLOW_TESTNET=true to accept it"
         )));
@@ -117,11 +120,11 @@ pub(crate) async fn client(config: &Config) -> Result<Client, AppError> {
     let builder = tempo(TempoConfig {
         recipient: PAY_TO_EVM,
     })
-    .rpc_url(&config.mpp_rpc_url)
+    .rpc_url(&rail.rpc_url)
     .chain_id(chain_id)
     .currency(PATH_USD)
     .realm(REALM)
-    .secret_key(&config.mpp_secret_key);
+    .secret_key(&rail.secret_key);
     let handler =
         Handler::create(builder).map_err(|err| AppError::InvalidConfig(format!("MPP: {err}")))?;
     let charge = ChargeRequest {
@@ -290,11 +293,8 @@ fn gateway_error() -> Response {
 #[cfg(test)]
 async fn client_on(config: &Config, chain: u64) -> Result<Client, AppError> {
     let rpc = make_tempo_rpc(chain).await;
-    client(&Config {
-        mpp_rpc_url: rpc.uri(),
-        ..config.clone()
-    })
-    .await
+    let config = config.clone().with_mpp_rpc_url(rpc.uri());
+    client(&config.mpp, config.allow_testnet).await
 }
 
 /// A mock Tempo RPC answering the startup `eth_chainId` query with `chain`,
@@ -405,12 +405,9 @@ mod tests {
     async fn client_requires_a_usable_endpoint() {
         // Both die in the startup chain query, the first step of the build.
         for endpoint in ["not a url", "http://127.0.0.1:1"] {
-            let config = Config {
-                mpp_rpc_url: endpoint.into(),
-                ..Config::for_tests()
-            };
+            let config = Config::for_tests().with_mpp_rpc_url(endpoint.into());
             assert!(matches!(
-                client(&config).await,
+                client(&config.mpp, config.allow_testnet).await,
                 Err(AppError::InvalidConfig(_))
             ));
         }

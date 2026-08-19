@@ -15,7 +15,10 @@ use x402_axum::facilitator_client::FacilitatorClient;
 
 use crate::error::json_error;
 use crate::screener::RestrictedAddressScreener;
-use crate::{AppError, Config};
+use crate::{AppError, config::X402Config};
+
+#[cfg(test)]
+use crate::Config;
 use x402_chain_eip155::{
     KnownNetworkEip155, V2Eip155Exact,
     chain::{ChecksummedAddress, Eip155TokenDeployment},
@@ -60,7 +63,7 @@ pub(crate) fn has_payment(headers: &HeaderMap) -> bool {
 /// The order states the deployment's preference. A deployment that allows the
 /// testnet leads with it, so clients that take the first offer they support
 /// pay with faucet money rather than the real thing.
-fn accepts(config: &Config) -> Result<Vec<v2::PaymentRequirements>, AppError> {
+fn accepts(allow_testnet: bool) -> Result<Vec<v2::PaymentRequirements>, AppError> {
     let pay_to: ChecksummedAddress = PAY_TO_EVM
         .parse()
         .map_err(|err| AppError::InvalidConfig(format!("x402 payTo: {err}")))?;
@@ -68,7 +71,7 @@ fn accepts(config: &Config) -> Result<Vec<v2::PaymentRequirements>, AppError> {
         V2Eip155Exact::price_tag(pay_to, usdc.amount(PRICE_USDC_BASE_UNITS)).requirements
     };
     let mut accepts = Vec::new();
-    if config.allow_testnet {
+    if allow_testnet {
         accepts.push(offer(USDC::base_sepolia()));
     }
     accepts.push(offer(USDC::base()));
@@ -150,14 +153,14 @@ pub(crate) struct Client {
     accepts: Vec<v2::PaymentRequirements>,
 }
 
-/// Build the x402 facilitator client from config. A bad `X402_FACILITATOR_URL` is a
-/// startup misconfiguration, surfaced as [`AppError`].
-pub(crate) fn client(config: &Config) -> Result<Client, AppError> {
-    let facilitator = FacilitatorClient::try_from(config.x402_facilitator_url.as_str())
+/// Build the x402 facilitator client from the rail's settings. A bad
+/// `X402_FACILITATOR_URL` is a startup misconfiguration, surfaced as [`AppError`].
+pub(crate) fn client(rail: &X402Config, allow_testnet: bool) -> Result<Client, AppError> {
+    let facilitator = FacilitatorClient::try_from(rail.facilitator_url.as_str())
         .map_err(|err| AppError::InvalidConfig(format!("X402_FACILITATOR_URL: {err}")))?;
     Ok(Client {
         facilitator,
-        accepts: accepts(config)?,
+        accepts: accepts(allow_testnet)?,
     })
 }
 
@@ -342,7 +345,7 @@ fn gateway_error(detail: &str) -> Response {
 /// counterpart of [`decode_payment`].
 #[cfg(test)]
 pub(crate) fn test_payment_signature(config: &Config, payload: Value) -> String {
-    let entries = accepts(config).expect("the test config advertises an offer");
+    let entries = accepts(config.allow_testnet).expect("the test config advertises an offer");
     let body = json!({ "accepted": &entries[0], "payload": payload });
     Base64Bytes::encode(body.to_string()).to_string()
 }
@@ -374,11 +377,7 @@ mod tests {
 
     #[test]
     fn without_the_testnet_flag_only_mainnet_is_offered() {
-        let production = Config {
-            allow_testnet: false,
-            ..Config::for_tests()
-        };
-        let entries = accepts(&production).unwrap();
+        let entries = accepts(false).unwrap();
         let [only] = entries.as_slice() else {
             panic!("a production config offers only mainnet");
         };
@@ -395,7 +394,7 @@ mod tests {
 
     #[test]
     fn decode_reads_the_offer_the_payer_accepted() {
-        let entries = accepts(&Config::for_tests()).unwrap();
+        let entries = accepts(Config::for_tests().allow_testnet).unwrap();
 
         let advertised = json!({ "accepted": &entries[0] });
         let (_, accepted, _) =
@@ -410,7 +409,7 @@ mod tests {
     fn a_tampered_offer_matches_nothing_we_advertise() {
         // Here the payer grants itself a discount. The payload still decodes, so
         // it is the value comparison in `handle` that refuses it.
-        let entries = accepts(&Config::for_tests()).unwrap();
+        let entries = accepts(Config::for_tests().allow_testnet).unwrap();
         let mut discounted = serde_json::to_value(&entries[0]).unwrap();
         discounted["amount"] = json!("1");
 
@@ -425,7 +424,8 @@ mod tests {
     fn challenge_emits_the_full_payment_required_payload() {
         // Every offer field is spelled out so an upstream change to the SDK's
         // consts fails here instead of silently moving the charge.
-        let client = client(&Config::for_tests()).unwrap();
+        let config = Config::for_tests();
+        let client = client(&config.x402, config.allow_testnet).unwrap();
         let (name, value) = challenge(
             &client,
             "https://bx402.example.com/res/v1/web/search?q=rust",

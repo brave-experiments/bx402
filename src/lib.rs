@@ -25,7 +25,7 @@ mod error;
 mod mpp;
 mod screener;
 mod x402;
-pub use config::Config;
+pub use config::{Config, MppConfig, X402Config};
 pub use error::AppError;
 pub use screener::{RestrictedAddressScreener, Status, init as init_screener};
 
@@ -154,11 +154,7 @@ mod tests {
     }
 
     fn config_with(base_url: String, facilitator_url: String) -> Config {
-        Config {
-            brave_search_api_base_url: base_url,
-            x402_facilitator_url: facilitator_url,
-            ..Config::for_tests()
-        }
+        test_config(base_url).with_facilitator_url(facilitator_url)
     }
 
     /// A config whose facilitator URL is parseable but unreachable, fine for the
@@ -177,11 +173,9 @@ mod tests {
         config: Config,
         screener: Option<RestrictedAddressScreener>,
     ) -> axum::Router {
-        let config = Config {
-            mpp_rpc_url: rpc.uri(),
-            ..config
-        };
-        app(config, screener).await.unwrap()
+        app(config.with_mpp_rpc_url(rpc.uri()), screener)
+            .await
+            .unwrap()
     }
 
     /// [`app_with`] a throwaway RPC, for tests that never verify an MPP
@@ -236,10 +230,7 @@ mod tests {
     /// backs the x402 rail, so an x402 attempt verifies and settles.
     async fn get_with(config: Config, uri: &str, rail: Rail) -> axum::response::Response {
         let facilitator = mock_facilitator(true, true).await;
-        let config = Config {
-            x402_facilitator_url: facilitator.uri(),
-            ..config
-        };
+        let config = config.with_facilitator_url(facilitator.uri());
         let mut request = Request::builder().uri(uri);
         for (name, value) in headers_for(rail) {
             request = request.header(name, value);
