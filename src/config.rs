@@ -7,6 +7,55 @@ use crate::AppError;
 /// Default base URL when `BRAVE_SEARCH_API_BASE_URL` is unset.
 const DEFAULT_BRAVE_SEARCH_API_BASE_URL: &str = "https://api.search.brave.com";
 
+/// Which payment rails the deployment turns on. This is the deployment-level
+/// toggle from `ENABLED_RAILS`, not the per-request `dispatch::Rail`. The
+/// default is every rail off, the starting point the parser adds to.
+#[derive(Default)]
+struct EnabledRails {
+    x402: bool,
+    mpp: bool,
+}
+
+/// Read `ENABLED_RAILS`. Unset enables both rails.
+fn enabled_rails() -> Result<EnabledRails, AppError> {
+    match env::var("ENABLED_RAILS") {
+        Ok(value) => parse_enabled_rails(&value),
+        Err(env::VarError::NotPresent) => Ok(EnabledRails {
+            x402: true,
+            mpp: true,
+        }),
+        Err(env::VarError::NotUnicode(_)) => Err(AppError::InvalidConfig(
+            "ENABLED_RAILS: not valid Unicode".into(),
+        )),
+    }
+}
+
+/// Parse an `ENABLED_RAILS` value: a comma-separated list of rail names, each
+/// `x402` or `mpp`. Anything else is refused, so a typo can never silently
+/// disable a rail.
+fn parse_enabled_rails(value: &str) -> Result<EnabledRails, AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::InvalidConfig(
+            "ENABLED_RAILS: empty; unset it to enable both rails, or list a subset of x402,mpp"
+                .into(),
+        ));
+    }
+    let mut rails = EnabledRails::default();
+    for token in value.split(',') {
+        match token.trim() {
+            "x402" => rails.x402 = true,
+            "mpp" => rails.mpp = true,
+            other => {
+                return Err(AppError::InvalidConfig(format!(
+                    "ENABLED_RAILS: unknown rail {other:?}, expected a comma-separated subset of x402,mpp"
+                )));
+            }
+        }
+    }
+    Ok(rails)
+}
+
 /// Settings for the x402 rail.
 #[cfg_attr(test, derive(Clone))]
 pub struct X402Config {
@@ -35,10 +84,10 @@ pub struct Config {
     /// Base URL of the Brave Search API. Overridable so tests can point at a
     /// mock server; defaults to the public endpoint.
     pub brave_search_api_base_url: String,
-    /// Settings for the x402 rail.
-    pub x402: X402Config,
-    /// Settings for the MPP rail.
-    pub mpp: MppConfig,
+    /// Settings for the x402 rail. `None` when `ENABLED_RAILS` leaves the rail out.
+    pub x402: Option<X402Config>,
+    /// Settings for the MPP rail. `None` when `ENABLED_RAILS` leaves the rail out.
+    pub mpp: Option<MppConfig>,
     /// S3 bucket holding the restricted-address list. `None` turns screening off,
     /// the default for local and testnet runs.
     pub restricted_address_s3_bucket: Option<String>,
@@ -48,13 +97,17 @@ pub struct Config {
 }
 
 impl Config {
-    /// Read configuration from the process environment. Each field comes from one
-    /// variable:
+    /// Read configuration from the process environment:
     ///
     /// * `BRAVE_SEARCH_API_KEY` (required): forwarded upstream as `X-Subscription-Token`.
-    /// * `X402_FACILITATOR_URL` (required): base URL of the x402 facilitator.
-    /// * `MPP_RPC_URL` (required): Tempo RPC endpoint for the MPP rail.
-    /// * `MPP_SECRET_KEY` (required): HMAC secret binding MPP challenges to this service.
+    /// * `ENABLED_RAILS` (optional): comma-separated subset of `x402,mpp` naming the
+    ///   rails to serve; unset enables both. A disabled rail's variables are not read.
+    /// * `X402_FACILITATOR_URL` (required when the x402 rail is enabled): base URL of
+    ///   the x402 facilitator.
+    /// * `MPP_RPC_URL` (required when the MPP rail is enabled): Tempo RPC endpoint for
+    ///   the MPP rail.
+    /// * `MPP_SECRET_KEY` (required when the MPP rail is enabled): HMAC secret binding
+    ///   MPP challenges to this service.
     /// * `BRAVE_SEARCH_API_BASE_URL` (optional): defaults to the public Brave Search API endpoint.
     /// * `RESTRICTED_ADDRESS_S3_BUCKET` (optional): unset or empty turns screening off.
     /// * `ALLOW_TESTNET` (optional): `true` permits testnet networks, with each
@@ -66,12 +119,21 @@ impl Config {
         let brave_search_api_key = require_var("BRAVE_SEARCH_API_KEY")?;
         let brave_search_api_base_url = env::var("BRAVE_SEARCH_API_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_BRAVE_SEARCH_API_BASE_URL.to_string());
-        let x402 = X402Config {
-            facilitator_url: require_var("X402_FACILITATOR_URL")?,
+        let rails = enabled_rails()?;
+        let x402 = if rails.x402 {
+            Some(X402Config {
+                facilitator_url: require_var("X402_FACILITATOR_URL")?,
+            })
+        } else {
+            None
         };
-        let mpp = MppConfig {
-            rpc_url: require_var("MPP_RPC_URL")?,
-            secret_key: require_var("MPP_SECRET_KEY")?,
+        let mpp = if rails.mpp {
+            Some(MppConfig {
+                rpc_url: require_var("MPP_RPC_URL")?,
+                secret_key: require_var("MPP_SECRET_KEY")?,
+            })
+        } else {
+            None
         };
         let restricted_address_s3_bucket = env::var("RESTRICTED_ADDRESS_S3_BUCKET")
             .ok()
@@ -96,27 +158,58 @@ impl Config {
         Self {
             brave_search_api_key: "secret-key".to_string(),
             brave_search_api_base_url: "http://upstream.invalid".to_string(),
-            x402: X402Config {
+            x402: Some(X402Config {
                 facilitator_url: "http://facilitator.invalid".to_string(),
-            },
-            mpp: MppConfig {
+            }),
+            mpp: Some(MppConfig {
                 rpc_url: "http://tempo.invalid".to_string(),
                 secret_key: "test-secret".to_string(),
-            },
+            }),
             restricted_address_s3_bucket: None,
             allow_testnet: true,
         }
     }
 
+    /// The x402 rail the test config enables.
+    pub(crate) fn x402_rail(&self) -> &X402Config {
+        self.x402
+            .as_ref()
+            .expect("the test config enables the x402 rail")
+    }
+
+    /// The MPP rail the test config enables.
+    pub(crate) fn mpp_rail(&self) -> &MppConfig {
+        self.mpp
+            .as_ref()
+            .expect("the test config enables the MPP rail")
+    }
+
     /// The same config with the x402 facilitator pointed at `url`.
     pub(crate) fn with_facilitator_url(mut self, url: String) -> Self {
-        self.x402.facilitator_url = url;
+        self.x402 = Some(X402Config {
+            facilitator_url: url,
+        });
         self
     }
 
     /// The same config with the MPP rail pointed at `url`.
     pub(crate) fn with_mpp_rpc_url(mut self, url: String) -> Self {
-        self.mpp.rpc_url = url;
+        self.mpp
+            .as_mut()
+            .expect("the test config enables the MPP rail")
+            .rpc_url = url;
+        self
+    }
+
+    /// The same config with the x402 rail disabled.
+    pub(crate) fn without_x402(mut self) -> Self {
+        self.x402 = None;
+        self
+    }
+
+    /// The same config with the MPP rail disabled.
+    pub(crate) fn without_mpp(mut self) -> Self {
+        self.mpp = None;
         self
     }
 }
@@ -131,5 +224,99 @@ fn require_var(name: &'static str) -> Result<String, AppError> {
         Err(env::VarError::NotUnicode(_)) => Err(AppError::InvalidConfig(format!(
             "{name}: not valid Unicode"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Case {
+        /// Label printed if the assertion fails.
+        name: &'static str,
+        /// The `ENABLED_RAILS` value to parse.
+        value: &'static str,
+        /// The `(x402, mpp)` flags the value should parse to, or `None` when
+        /// the value must be rejected.
+        expected: Option<(bool, bool)>,
+    }
+
+    #[test]
+    fn parse_enabled_rails_accepts_only_known_rails() {
+        let cases = [
+            Case {
+                name: "both rails",
+                value: "x402,mpp",
+                expected: Some((true, true)),
+            },
+            Case {
+                name: "both rails, either order",
+                value: "mpp,x402",
+                expected: Some((true, true)),
+            },
+            Case {
+                name: "x402 only",
+                value: "x402",
+                expected: Some((true, false)),
+            },
+            Case {
+                name: "mpp only",
+                value: "mpp",
+                expected: Some((false, true)),
+            },
+            Case {
+                name: "whitespace around tokens",
+                value: " x402 , mpp ",
+                expected: Some((true, true)),
+            },
+            Case {
+                name: "duplicate rail",
+                value: "x402,x402",
+                expected: Some((true, false)),
+            },
+            Case {
+                name: "empty",
+                value: "",
+                expected: None,
+            },
+            Case {
+                name: "only whitespace",
+                value: "  ",
+                expected: None,
+            },
+            Case {
+                name: "unknown rail",
+                value: "btc",
+                expected: None,
+            },
+            Case {
+                name: "rail names are lowercase",
+                value: "X402",
+                expected: None,
+            },
+            Case {
+                name: "trailing comma",
+                value: "x402,",
+                expected: None,
+            },
+        ];
+        for Case {
+            name,
+            value,
+            expected,
+        } in cases
+        {
+            let parsed = parse_enabled_rails(value).map(|rails| (rails.x402, rails.mpp));
+            match expected {
+                Some(flags) => assert_eq!(parsed.ok(), Some(flags), "case: {name}"),
+                None => {
+                    let message = parsed.expect_err(name).to_string();
+                    assert!(
+                        message.contains("ENABLED_RAILS"),
+                        "case: {name}, error was: {message}"
+                    );
+                }
+            }
+        }
     }
 }

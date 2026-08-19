@@ -294,7 +294,7 @@ fn gateway_error() -> Response {
 async fn client_on(config: &Config, chain: u64) -> Result<Client, AppError> {
     let rpc = make_tempo_rpc(chain).await;
     let config = config.clone().with_mpp_rpc_url(rpc.uri());
-    client(&config.mpp, config.allow_testnet).await
+    client(config.mpp_rail(), config.allow_testnet).await
 }
 
 /// A mock Tempo RPC answering the startup `eth_chainId` query with `chain`,
@@ -407,7 +407,7 @@ mod tests {
         for endpoint in ["not a url", "http://127.0.0.1:1"] {
             let config = Config::for_tests().with_mpp_rpc_url(endpoint.into());
             assert!(matches!(
-                client(&config.mpp, config.allow_testnet).await,
+                client(config.mpp_rail(), config.allow_testnet).await,
                 Err(AppError::InvalidConfig(_))
             ));
         }

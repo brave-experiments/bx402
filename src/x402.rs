@@ -425,7 +425,7 @@ mod tests {
         // Every offer field is spelled out so an upstream change to the SDK's
         // consts fails here instead of silently moving the charge.
         let config = Config::for_tests();
-        let client = client(&config.x402, config.allow_testnet).unwrap();
+        let client = client(config.x402_rail(), config.allow_testnet).unwrap();
         let (name, value) = challenge(
             &client,
             "https://bx402.example.com/res/v1/web/search?q=rust",

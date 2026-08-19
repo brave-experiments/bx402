@@ -7,6 +7,10 @@
 //! * **x402** (`PAYMENT-SIGNATURE`): run through the x402 verify/settle flow
 //! * **MPP** (`Authorization`): run through the MPP verify flow
 //! * **collision** (both rails at once): rejected with `400`
+//!
+//! A deployment can disable a rail through `ENABLED_RAILS`. An attempt on a
+//! disabled rail is answered with the cold `402`, which advertises only the
+//! rails that can actually take a payment.
 
 use axum::{
     extract::{Request, State},
@@ -56,8 +60,10 @@ fn classify(headers: &HeaderMap) -> Rail {
 fn cold_402(ctx: &Context, resource: &str, method: &Method) -> Response {
     let mut response = StatusCode::PAYMENT_REQUIRED.into_response();
     let challenges = [
-        x402::challenge(&ctx.x402, resource, method),
-        mpp::challenge(&ctx.mpp),
+        ctx.x402
+            .as_ref()
+            .and_then(|client| x402::challenge(client, resource, method)),
+        ctx.mpp.as_ref().and_then(mpp::challenge),
     ];
     for (name, value) in challenges.into_iter().flatten() {
         response.headers_mut().insert(name, value);
@@ -71,11 +77,12 @@ fn collision_400() -> Response {
 }
 
 /// The dispatch middleware's state: one field per payment rail, built once at
-/// startup and cloned into each request.
+/// startup and cloned into each request. A rail is `None` when the deployment
+/// disables it.
 #[derive(Clone)]
 pub(crate) struct Context {
-    pub(crate) x402: x402::Client,
-    pub(crate) mpp: mpp::Client,
+    pub(crate) x402: Option<x402::Client>,
+    pub(crate) mpp: Option<mpp::Client>,
     /// Payer screener, shared by every rail. `None` when screening is not configured.
     pub(crate) screener: Option<RestrictedAddressScreener>,
 }
@@ -87,9 +94,18 @@ pub(crate) async fn context(
     config: &Config,
     screener: Option<RestrictedAddressScreener>,
 ) -> Result<Context, AppError> {
+    // x402 first: a bad facilitator URL is reported before any RPC traffic.
+    let x402 = match &config.x402 {
+        Some(rail) => Some(x402::client(rail, config.allow_testnet)?),
+        None => None,
+    };
+    let mpp = match &config.mpp {
+        Some(rail) => Some(mpp::client(rail, config.allow_testnet).await?),
+        None => None,
+    };
     Ok(Context {
-        x402: x402::client(&config.x402, config.allow_testnet)?,
-        mpp: mpp::client(&config.mpp, config.allow_testnet).await?,
+        x402,
+        mpp,
         screener,
     })
 }
@@ -99,11 +115,21 @@ pub(crate) async fn context(
 /// never how a rail verifies.
 pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Next) -> Response {
     match classify(req.headers()) {
-        Rail::None => cold_402(&ctx, &absolute_uri(&req), req.method()),
-        Rail::Both => collision_400(),
-        Rail::X402 => x402::handle(ctx.x402, ctx.screener, req, next).await,
-        Rail::Mpp => mpp::handle(ctx.mpp, ctx.screener, req, next).await,
+        Rail::Both => return collision_400(),
+        Rail::X402 => {
+            if let Some(client) = ctx.x402 {
+                return x402::handle(client, ctx.screener, req, next).await;
+            }
+        }
+        Rail::Mpp => {
+            if let Some(client) = ctx.mpp {
+                return mpp::handle(client, ctx.screener, req, next).await;
+            }
+        }
+        Rail::None => {}
     }
+    // Nothing here can pay: no proof, or proof on a rail the deployment disables.
+    cold_402(&ctx, &absolute_uri(&req), req.method())
 }
 
 /// Reconstruct the absolute URL the client requested for the cold `402`'s
@@ -280,6 +306,32 @@ mod tests {
         // The body carries nothing, V2 clients read only the headers.
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cold_402_advertises_only_the_enabled_rail() {
+        let resource = "https://bx402.example.com/res/v1/web/search?q=rust";
+
+        // x402 only. No RPC server exists anywhere in this half, which also
+        // proves a disabled MPP rail skips the startup chain query.
+        let ctx = context(&Config::for_tests().without_mpp(), None)
+            .await
+            .unwrap();
+        let response = cold_402(&ctx, resource, &Method::GET);
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert!(response.headers().contains_key("payment-required"));
+        assert!(!response.headers().contains_key(header::WWW_AUTHENTICATE));
+
+        // MPP only: the inverse.
+        let rpc = mpp::test_rpc().await;
+        let config = Config::for_tests()
+            .with_mpp_rpc_url(rpc.uri())
+            .without_x402();
+        let ctx = context(&config, None).await.unwrap();
+        let response = cold_402(&ctx, resource, &Method::GET);
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert!(!response.headers().contains_key("payment-required"));
+        assert!(response.headers().contains_key(header::WWW_AUTHENTICATE));
     }
 
     /// Build a request carrying `headers`, for exercising `absolute_uri`.

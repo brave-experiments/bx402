@@ -73,10 +73,12 @@ payment on chain.
 No facilitator and no sidecar here: the server talks to a Tempo RPC endpoint directly, and
 verifying an MPP credential is what settles it. Only the payer needs funding.
 
-1. Write the config to `.env` and start the server (`ALLOW_TESTNET` is required because
+1. Write the config to `.env` and start the server (`ENABLED_RAILS=mpp` runs the MPP
+   rail alone, so no facilitator config is needed; `ALLOW_TESTNET` is required because
    Moderato is a testnet):
    ```sh
    echo "BRAVE_SEARCH_API_KEY=<your-key>" >> .env
+   echo "ENABLED_RAILS=mpp" >> .env
    echo "MPP_RPC_URL=https://rpc.moderato.tempo.xyz" >> .env
    echo "MPP_SECRET_KEY=$(openssl rand -hex 32)" >> .env
    echo "ALLOW_TESTNET=true" >> .env
@@ -109,6 +111,10 @@ Both rails charge 5000 base units (0.005 of a six decimal token) to the same tre
 `ALLOW_TESTNET=true` admits testnets. x402 then advertises the Base Sepolia offer first, so
 a client taking the first offer it supports pays with faucet money. MPP discovers its chain
 from `MPP_RPC_URL` at startup and refuses to start on a testnet without the variable.
+
+`ENABLED_RAILS` picks which rails the deployment serves, as a comma-separated subset of
+`x402,mpp`; unset enables both. A disabled rail's variables are not read, its challenge is
+not advertised, and a payment attempt on it gets the plain 402 naming the rails that remain.
 
 x402 verifies (a dry run that moves nothing), runs the search, then settles, so a failed
 search is never charged and a returned result always means the payment settled. An MPP
