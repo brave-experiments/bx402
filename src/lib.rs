@@ -225,19 +225,43 @@ mod tests {
         }
     }
 
+    /// A `GET` against `uri` carrying the payment headers for `rail`, so the
+    /// request reaches the dispatch gate in the chosen state.
+    fn request_for(uri: &str, rail: Rail) -> Request<Body> {
+        let mut request = Request::builder().uri(uri);
+        for (name, value) in headers_for(rail) {
+            request = request.header(name, value);
+        }
+        request.body(Body::empty()).unwrap()
+    }
+
+    /// Assert `response` is the cold `402`: an empty body, and a challenge
+    /// header for exactly the rails in `advertises`.
+    async fn assert_cold_402(response: axum::response::Response, advertises: &[Rail]) {
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(
+            response.headers().contains_key("payment-required"),
+            advertises.contains(&Rail::X402),
+            "x402 challenge"
+        );
+        assert_eq!(
+            response.headers().contains_key("www-authenticate"),
+            advertises.contains(&Rail::Mpp),
+            "mpp challenge"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty());
+    }
+
     /// Drive `app()` for a `GET` against `uri`, carrying the payment headers for `rail`
     /// so the request reaches the dispatch gate in the chosen state. A valid facilitator
     /// backs the x402 rail, so an x402 attempt verifies and settles.
     async fn get_with(config: Config, uri: &str, rail: Rail) -> axum::response::Response {
         let facilitator = mock_facilitator(true, true).await;
         let config = config.with_facilitator_url(facilitator.uri());
-        let mut request = Request::builder().uri(uri);
-        for (name, value) in headers_for(rail) {
-            request = request.header(name, value);
-        }
         test_app(config, None)
             .await
-            .oneshot(request.body(Body::empty()).unwrap())
+            .oneshot(request_for(uri, rail))
             .await
             .unwrap()
     }
@@ -260,6 +284,42 @@ mod tests {
             app(config, None).await,
             Err(AppError::InvalidConfig(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn x402_only_app_needs_no_rpc_and_cold_402s_an_mpp_attempt() {
+        // Built directly, with no mock RPC bound anywhere: a disabled MPP rail
+        // must skip the startup chain query entirely.
+        let config = test_config("http://upstream.invalid".to_string()).without_mpp();
+        let app = app(config, None).await.unwrap();
+
+        let response = app
+            .oneshot(request_for("/res/v1/web/search?q=rust", Rail::Mpp))
+            .await
+            .unwrap();
+
+        // The cold challenge, not the MPP rail's refusal.
+        assert_cold_402(response, &[Rail::X402]).await;
+    }
+
+    #[tokio::test]
+    async fn mpp_only_app_cold_402s_an_x402_attempt() {
+        let config = test_config("http://upstream.invalid".to_string()).without_x402();
+        let app = test_app(config, None).await;
+
+        let response = app
+            .clone()
+            .oneshot(request_for("/res/v1/web/search?q=rust", Rail::X402))
+            .await
+            .unwrap();
+        assert_cold_402(response, &[Rail::Mpp]).await;
+
+        // Carrying both rails' headers stays a collision, disabled rail or not.
+        let response = app
+            .oneshot(request_for("/res/v1/web/search?q=rust", Rail::Both))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
