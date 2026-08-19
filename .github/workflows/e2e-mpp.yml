@@ -57,8 +57,7 @@ jobs:
       - uses: ./.github/actions/start-bx402
         with:
           brave-search-api-key: ${{ secrets.BRAVE_SEARCH_API_KEY }}
-          # The x402 rail is undriven here, so any parseable URL satisfies startup.
-          x402-facilitator-url: http://facilitator.invalid
+          enabled-rails: mpp
       - name: Pay for a search
         run: bash .github/scripts/e2e/mpp/${{ matrix.client }}.sh
       - name: Show logs

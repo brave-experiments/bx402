@@ -6,8 +6,17 @@ inputs:
     description: Brave Search API key the server forwards upstream
     required: true
   x402-facilitator-url:
-    description: x402 facilitator the server verifies and settles against
-    required: true
+    description: >-
+      x402 facilitator the server verifies and settles against. Empty leaves
+      X402_FACILITATOR_URL unset, for runs that disable the x402 rail.
+    required: false
+    default: ""
+  enabled-rails:
+    description: >-
+      ENABLED_RAILS value for the server. Empty leaves the variable unset,
+      enabling both rails.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -20,9 +29,15 @@ runs:
       env:
         BRAVE_SEARCH_API_KEY: ${{ inputs.brave-search-api-key }}
         X402_FACILITATOR_URL: ${{ inputs.x402-facilitator-url }}
+        ENABLED_RAILS: ${{ inputs.enabled-rails }}
         ALLOW_TESTNET: "true"
       run: |
         chmod +x bx402
+        # An empty input means "not provided": the server must see the variable
+        # as unset, not as an empty string (an empty ENABLED_RAILS is a startup
+        # error by design).
+        if [ -z "$ENABLED_RAILS" ]; then unset ENABLED_RAILS; fi
+        if [ -z "$X402_FACILITATOR_URL" ]; then unset X402_FACILITATOR_URL; fi
         MPP_SECRET_KEY=$(openssl rand -hex 32) ./bx402 > server.log 2>&1 &
         for _ in $(seq 1 30); do
           curl -sf -o /dev/null http://localhost:8080/health && exit 0
