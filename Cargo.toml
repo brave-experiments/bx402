@@ -42,6 +42,6 @@ aws-config = "1"
 base64 = "0.23"
 
 [dev-dependencies]
-http-body-util = "=0.1.4"
+http-body-util = "=0.1.5"
 tower = { version = "=0.5.3", features = ["util"] }
 wiremock = "=0.6.5"
