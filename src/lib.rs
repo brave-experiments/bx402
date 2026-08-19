@@ -323,6 +323,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_rails_app_402s_every_payment_attempt() {
+        // `ENABLED_RAILS=none`: the service stays up but nothing is payable.
+        // Built with no facilitator and no RPC anywhere.
+        let config = test_config("http://upstream.invalid".to_string())
+            .without_x402()
+            .without_mpp();
+        let app = app(config, None).await.unwrap();
+
+        // Cold, an MPP attempt, and an x402 attempt all get the bare 402, which
+        // advertises nothing.
+        for rail in [Rail::None, Rail::Mpp, Rail::X402] {
+            let response = app
+                .clone()
+                .oneshot(request_for("/res/v1/web/search?q=rust", rail))
+                .await
+                .unwrap();
+            assert_cold_402(response, &[]).await;
+        }
+
+        // The health probe stays green, so a load balancer keeps the service up.
+        let response = app
+            .oneshot(request_for("/health", Rail::None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn health_returns_200() {
         let response = get_with(
             test_config("http://upstream.invalid".to_string()),

@@ -115,6 +115,8 @@ from `MPP_RPC_URL` at startup and refuses to start on a testnet without the vari
 `ENABLED_RAILS` picks which rails the deployment serves, as a comma-separated subset of
 `x402,mpp`; unset enables both. A disabled rail's variables are not read, its challenge is
 not advertised, and a payment attempt on it gets the plain 402 naming the rails that remain.
+`ENABLED_RAILS=none` serves no rails at all: the service stays up and answers every payment
+attempt with a 402 offering nothing, which suspends payments without taking the proxy down.
 
 x402 verifies (a dry run that moves nothing), runs the search, then settles, so a failed
 search is never charged and a returned result always means the payment settled. An MPP

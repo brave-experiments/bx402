@@ -31,8 +31,8 @@ fn enabled_rails() -> Result<EnabledRails, AppError> {
 }
 
 /// Parse an `ENABLED_RAILS` value: a comma-separated list of rail names, each
-/// `x402` or `mpp`. Anything else is refused, so a typo can never silently
-/// disable a rail.
+/// `x402` or `mpp`, or the word `none` alone to serve no rails at all. Anything
+/// else is refused, so a typo can never silently disable a rail.
 fn parse_enabled_rails(value: &str) -> Result<EnabledRails, AppError> {
     let value = value.trim();
     if value.is_empty() {
@@ -41,6 +41,11 @@ fn parse_enabled_rails(value: &str) -> Result<EnabledRails, AppError> {
                 .into(),
         ));
     }
+    // The switch for taking every rail offline at once. Only valid alone:
+    // naming a rail next to `none` is a contradiction, not a list.
+    if value == "none" {
+        return Ok(EnabledRails::default());
+    }
     let mut rails = EnabledRails::default();
     for token in value.split(',') {
         match token.trim() {
@@ -48,7 +53,7 @@ fn parse_enabled_rails(value: &str) -> Result<EnabledRails, AppError> {
             "mpp" => rails.mpp = true,
             other => {
                 return Err(AppError::InvalidConfig(format!(
-                    "ENABLED_RAILS: unknown rail {other:?}, expected a comma-separated subset of x402,mpp"
+                    "ENABLED_RAILS: unknown rail {other:?}, expected none or a comma-separated subset of x402,mpp"
                 )));
             }
         }
@@ -101,7 +106,8 @@ impl Config {
     ///
     /// * `BRAVE_SEARCH_API_KEY` (required): forwarded upstream as `X-Subscription-Token`.
     /// * `ENABLED_RAILS` (optional): comma-separated subset of `x402,mpp` naming the
-    ///   rails to serve; unset enables both. A disabled rail's variables are not read.
+    ///   rails to serve, or `none` to serve no rails; unset enables both. A disabled
+    ///   rail's variables are not read.
     /// * `X402_FACILITATOR_URL` (required when the x402 rail is enabled): base URL of
     ///   the x402 facilitator.
     /// * `MPP_RPC_URL` (required when the MPP rail is enabled): Tempo RPC endpoint for
@@ -273,6 +279,21 @@ mod tests {
                 name: "duplicate rail",
                 value: "x402,x402",
                 expected: Some((true, false)),
+            },
+            Case {
+                name: "none turns every rail off",
+                value: "none",
+                expected: Some((false, false)),
+            },
+            Case {
+                name: "none with whitespace",
+                value: " none ",
+                expected: Some((false, false)),
+            },
+            Case {
+                name: "none is only valid alone",
+                value: "none,x402",
+                expected: None,
             },
             Case {
                 name: "empty",
