@@ -147,9 +147,14 @@ fn host(req: &Request) -> Option<&str> {
 }
 
 /// The scheme the client used: `X-Forwarded-Proto` when a TLS-terminating proxy
-/// sets it, else the URI's scheme, else `http`.
+/// sets it, else the URI's scheme, else `http`. Each proxy hop may append its
+/// own value to the header, making it a comma-separated list, so only the first
+/// entry (the hop the client spoke to) is read.
 fn scheme(req: &Request) -> &str {
     header_str(req, "x-forwarded-proto")
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|scheme| !scheme.is_empty())
         .or_else(|| req.uri().scheme_str())
         .unwrap_or("http")
 }
@@ -345,6 +350,23 @@ mod tests {
                 name: "default http port dropped",
                 uri: "/res/v1/web/search",
                 headers: vec![("host", "api.bx402.io:80")],
+                expected: "http://api.bx402.io/res/v1/web/search",
+            },
+            // Behind chained proxies each hop appends to `X-Forwarded-Proto`; the
+            // first entry is the scheme the client actually used.
+            Case {
+                name: "forwarded proto list reads the first hop",
+                uri: "/res/v1/web/search",
+                headers: vec![
+                    ("host", "api.bx402.io"),
+                    ("x-forwarded-proto", "https, http"),
+                ],
+                expected: "https://api.bx402.io/res/v1/web/search",
+            },
+            Case {
+                name: "empty forwarded proto falls back to http",
+                uri: "/res/v1/web/search",
+                headers: vec![("host", "api.bx402.io"), ("x-forwarded-proto", "")],
                 expected: "http://api.bx402.io/res/v1/web/search",
             },
             Case {
