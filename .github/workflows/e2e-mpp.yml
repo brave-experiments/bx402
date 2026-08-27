@@ -59,6 +59,12 @@ jobs:
           brave-search-api-key: ${{ secrets.BRAVE_SEARCH_API_KEY }}
           enabled-rails: mpp
       - name: Pay for a search
+        env:
+          # The Tempo installer verifies the release build attestation through
+          # an authenticated gh, and reads the release list without hitting the
+          # anonymous rate limit. Its other path, a GPG signature, cannot fetch
+          # the signing key.
+          GH_TOKEN: ${{ github.token }}
         run: bash .github/scripts/e2e/mpp/${{ matrix.client }}.sh
       - name: Show logs
         if: failure()
