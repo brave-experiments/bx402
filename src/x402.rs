@@ -3,6 +3,9 @@
 //! See `mpp.rs` for the MPP rail and `dispatch.rs` for the neutral router that
 //! classifies each request and delegates to whichever rail it is paying on.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use axum::{
     extract::Request,
     http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header::HeaderName},
@@ -13,6 +16,7 @@ use axum::{
 use serde_json::{Value, json};
 use x402_axum::facilitator_client::FacilitatorClient;
 
+use crate::endpoints;
 use crate::error::json_error;
 use crate::screener::RestrictedAddressScreener;
 use crate::{AppError, config::X402Config};
@@ -46,10 +50,6 @@ const PAYMENT_REQUIRED_HEADER: &str = "payment-required";
 /// The EVM treasury address that receives x402 payments (`payTo`).
 const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
 
-/// Flat price per request, in USDC base units (6 decimals, so `5_000` = 0.005 USDC).
-/// One rate for every request today; pricing may later vary by endpoint or by rail.
-const PRICE_USDC_BASE_UNITS: u64 = 5_000;
-
 /// Returns `true` if the request carries an x402 V2 payment proof.
 pub(crate) fn has_payment(headers: &HeaderMap) -> bool {
     headers.contains_key(V2_PAYMENT_HEADER)
@@ -63,19 +63,30 @@ pub(crate) fn has_payment(headers: &HeaderMap) -> bool {
 /// The order states the deployment's preference. A deployment that allows the
 /// testnet leads with it, so clients that take the first offer they support
 /// pay with faucet money rather than the real thing.
-fn accepts(allow_testnet: bool) -> Result<Vec<v2::PaymentRequirements>, AppError> {
+fn accepts(
+    allow_testnet: bool,
+) -> Result<HashMap<&'static str, Vec<v2::PaymentRequirements>>, AppError> {
     let pay_to: ChecksummedAddress = PAY_TO_EVM
         .parse()
         .map_err(|err| AppError::InvalidConfig(format!("x402 payTo: {err}")))?;
-    let offer = |usdc: Eip155TokenDeployment| {
-        V2Eip155Exact::price_tag(pay_to, usdc.amount(PRICE_USDC_BASE_UNITS)).requirements
+    let networks: Vec<Eip155TokenDeployment> = if allow_testnet {
+        vec![USDC::base_sepolia(), USDC::base()]
+    } else {
+        vec![USDC::base()]
     };
-    let mut accepts = Vec::new();
-    if allow_testnet {
-        accepts.push(offer(USDC::base_sepolia()));
-    }
-    accepts.push(offer(USDC::base()));
-    Ok(accepts)
+    Ok(endpoints::ENDPOINTS
+        .iter()
+        .map(|endpoint| {
+            let offers = networks
+                .iter()
+                .map(|usdc| {
+                    V2Eip155Exact::price_tag(pay_to, usdc.amount(endpoint.price_base_units))
+                        .requirements
+                })
+                .collect();
+            (endpoint.path, offers)
+        })
+        .collect())
 }
 
 /// The route binding mppx needs before it will sign, under the key it reads.
@@ -96,14 +107,6 @@ fn route_extensions(method: &Method) -> v2::ExtensionsJson {
     .collect()
 }
 
-/// Label for each paid endpoint, keyed by request path.
-fn endpoint_description(path: &str) -> &'static str {
-    match path {
-        crate::WEB_SEARCH_PATH => "Brave Search API - Web / Search",
-        _ => "Brave Search API",
-    }
-}
-
 /// x402's part of the cold `402`: the V2 `PaymentRequired` envelope for
 /// `resource`, base64 encoded into the `Payment-Required` header, the V2
 /// transport clients read. `None` if it cannot be encoded, leaving the `402`
@@ -115,15 +118,21 @@ pub(crate) fn challenge(
 ) -> Option<(HeaderName, HeaderValue)> {
     let uri = resource.parse::<Uri>().ok();
     let path = uri.as_ref().map(|u| u.path()).unwrap_or(resource);
+    // Advertise this endpoint's price and no other. A client that is offered every
+    // price at once could pay the cheapest and call the dearest.
+    let (Some(endpoint), Some(accepts)) = (endpoints::find(path), client.accepts.get(path)) else {
+        tracing::error!(path, "no x402 offer for a paid path");
+        return None;
+    };
     let envelope = v2::PaymentRequired {
         x402_version: v2::X402Version2,
         error: Some(PAYMENT_REQUIRED.to_string()),
         resource: Some(v2::ResourceInfo {
             url: resource.to_string(),
-            description: Some(endpoint_description(path).to_string()),
+            description: Some(endpoint.description.to_string()),
             mime_type: Some("application/json".to_string()),
         }),
-        accepts: client.accepts.clone(),
+        accepts: accepts.clone(),
         extensions: route_extensions(method),
     };
     // `try_from` takes the String by value, so the envelope moves into the header.
@@ -148,9 +157,14 @@ pub(crate) fn challenge(
 #[derive(Clone)]
 pub(crate) struct Client {
     facilitator: FacilitatorClient,
-    /// Built once at startup. The cold `402` advertises exactly these entries
-    /// and a payment must accept one of them, so the two can never disagree.
-    accepts: Vec<v2::PaymentRequirements>,
+    /// Offers per paid path, built once at startup. The cold `402` for a path
+    /// advertises exactly that path's entries and a payment must accept one of
+    /// them, so the two can never disagree and no path is payable at another's
+    /// price.
+    ///
+    /// Shared rather than owned: axum clones this client into every request, so
+    /// an owned table would be deep-copied per request.
+    accepts: Arc<HashMap<&'static str, Vec<v2::PaymentRequirements>>>,
 }
 
 /// Build the x402 facilitator client from the rail's settings. A bad
@@ -160,7 +174,7 @@ pub(crate) fn client(rail: &X402Config, allow_testnet: bool) -> Result<Client, A
         .map_err(|err| AppError::InvalidConfig(format!("X402_FACILITATOR_URL: {err}")))?;
     Ok(Client {
         facilitator,
-        accepts: accepts(allow_testnet)?,
+        accepts: Arc::new(accepts(allow_testnet)?),
     })
 }
 
@@ -182,9 +196,14 @@ pub(crate) async fn handle(
         return payment_rejected(MALFORMED_PAYMENT);
     };
 
-    // The payer must accept an offer we advertised, so it cannot name its own
-    // price, asset, or recipient. Refused like any other payment we decline.
-    let Some(offer) = client.accepts.iter().find(|offer| **offer == accepted) else {
+    // The payer must accept an offer we advertised for the path it is calling, so
+    // it can name neither its own price, asset, and recipient, nor another
+    // endpoint's cheaper offer. Refused like any other payment we decline.
+    let offer = client
+        .accepts
+        .get(req.uri().path())
+        .and_then(|offers| offers.iter().find(|offer| **offer == accepted));
+    let Some(offer) = offer else {
         return payment_rejected(GENERIC_REJECTION);
     };
     let Some(request) = verify_request(&payload, offer) else {
@@ -344,10 +363,19 @@ fn gateway_error(detail: &str) -> Response {
 /// from `config`, carrying `payload` as the scheme payload. The test-side
 /// counterpart of [`decode_payment`].
 #[cfg(test)]
-pub(crate) fn test_payment_signature(config: &Config, payload: Value) -> String {
-    let entries = accepts(config.allow_testnet).expect("the test config advertises an offer");
+pub(crate) fn test_payment_signature(config: &Config, path: &str, payload: Value) -> String {
+    let entries = test_offers(config.allow_testnet, path);
     let body = json!({ "accepted": &entries[0], "payload": payload });
     Base64Bytes::encode(body.to_string()).to_string()
+}
+
+/// The offers advertised for one paid path.
+#[cfg(test)]
+fn test_offers(allow_testnet: bool, path: &str) -> Vec<v2::PaymentRequirements> {
+    accepts(allow_testnet)
+        .expect("the test config advertises offers")
+        .remove(path)
+        .unwrap_or_else(|| panic!("{path} is a paid endpoint"))
 }
 
 /// Decode a base64 `Payment-Required` challenge header back to JSON, the
@@ -377,11 +405,27 @@ mod tests {
 
     #[test]
     fn without_the_testnet_flag_only_mainnet_is_offered() {
-        let entries = accepts(false).unwrap();
+        let entries = test_offers(false, crate::WEB_SEARCH_PATH);
         let [only] = entries.as_slice() else {
             panic!("a production config offers only mainnet");
         };
         assert_eq!(only.network.to_string(), "eip155:8453"); // Base mainnet
+    }
+
+    #[test]
+    fn each_endpoint_is_offered_at_its_own_price() {
+        let web = test_offers(false, "/res/v1/web/search");
+        let suggest = test_offers(false, "/res/v1/suggest/search");
+
+        let amount = |offer: &v2::PaymentRequirements| {
+            serde_json::to_value(offer).unwrap()["amount"].clone()
+        };
+        assert_eq!(amount(&web[0]), json!("5000"));
+        assert_eq!(amount(&suggest[0]), json!("500"));
+
+        // The cheap offer is not among the dear endpoint's, so accepting it there
+        // finds no match in `handle` and the payment is refused.
+        assert!(!web.contains(&suggest[0]));
     }
 
     /// A header map carrying `payload` as the base64 `PAYMENT-SIGNATURE`.
@@ -394,7 +438,7 @@ mod tests {
 
     #[test]
     fn decode_reads_the_offer_the_payer_accepted() {
-        let entries = accepts(Config::for_tests().allow_testnet).unwrap();
+        let entries = test_offers(Config::for_tests().allow_testnet, crate::WEB_SEARCH_PATH);
 
         let advertised = json!({ "accepted": &entries[0] });
         let (_, accepted, _) =
@@ -409,7 +453,7 @@ mod tests {
     fn a_tampered_offer_matches_nothing_we_advertise() {
         // Here the payer grants itself a discount. The payload still decodes, so
         // it is the value comparison in `handle` that refuses it.
-        let entries = accepts(Config::for_tests().allow_testnet).unwrap();
+        let entries = test_offers(Config::for_tests().allow_testnet, crate::WEB_SEARCH_PATH);
         let mut discounted = serde_json::to_value(&entries[0]).unwrap();
         discounted["amount"] = json!("1");
 

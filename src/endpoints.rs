@@ -4,10 +4,6 @@
 //! the price we advertise, and the price we verify against can never drift apart.
 //! The table is protocol-neutral: it names no rail and imports nothing from one.
 
-// A data table stands on its own, so entries and fields are kept whole rather
-// than trimmed to whichever ones the current callers happen to touch.
-#![allow(dead_code)]
-
 /// Brave's Web Search and LLM Context rate, $5.00 per 1,000 requests.
 const SEARCH_RATE: u64 = 5_000;
 

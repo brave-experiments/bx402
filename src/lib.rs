@@ -151,7 +151,7 @@ mod tests {
     /// with an empty scheme payload. Enough to pass decoding and reach the
     /// facilitator.
     fn payment_signature() -> String {
-        x402::test_payment_signature(&Config::for_tests(), serde_json::json!({}))
+        x402::test_payment_signature(&Config::for_tests(), WEB_SEARCH_PATH, serde_json::json!({}))
     }
 
     fn config_with(base_url: String, facilitator_url: String) -> Config {
@@ -710,6 +710,7 @@ mod tests {
     fn paid_request_from(from: &str) -> Request<Body> {
         let signature = x402::test_payment_signature(
             &Config::for_tests(),
+            WEB_SEARCH_PATH,
             serde_json::json!({ "authorization": { "from": from } }),
         );
         Request::builder()
