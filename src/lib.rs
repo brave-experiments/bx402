@@ -11,7 +11,7 @@ use axum::{
     Router,
     extract::{RawQuery, State},
     http::{
-        HeaderMap, StatusCode,
+        HeaderMap, StatusCode, Uri,
         header::{ACCEPT, CONTENT_TYPE},
     },
     middleware,
@@ -41,8 +41,9 @@ struct AppState {
     config: Arc<Config>,
 }
 
-/// Path of the Brave web-search endpoint, used both as our route and as the
-/// upstream path we forward to.
+/// The paid path tests reach for when any one endpoint will do. Production
+/// routing reads every path from the catalog instead.
+#[cfg(test)]
 const WEB_SEARCH_PATH: &str = "/res/v1/web/search";
 
 /// How long to wait for the upstream connection to establish before giving up.
@@ -79,15 +80,15 @@ pub async fn app(
             .map_err(|err| AppError::InvalidConfig(format!("search client: {err}")))?,
         config: Arc::new(config),
     };
-    let router = Router::new()
-        .route("/health", get(health))
-        .route(
-            WEB_SEARCH_PATH,
-            // `route_layer` runs the dispatch gate only when the method matches, so
-            // an unsupported method gets the plain 405 instead of a payable 402
-            // whose search would then be refused.
-            get(search).route_layer(middleware::from_fn_with_state(context, dispatch::dispatch)),
-        )
+    // `route_layer` runs the dispatch gate only when the method matches, so
+    // an unsupported method gets the plain 405 instead of a payable 402
+    // whose search would then be refused.
+    let paid = get(search).route_layer(middleware::from_fn_with_state(context, dispatch::dispatch));
+    let mut router = Router::new().route("/health", get(health));
+    for endpoint in endpoints::ENDPOINTS {
+        router = router.route(endpoint.path, paid.clone());
+    }
+    let router = router
         // Span and log each request; failures log at `error`, so a 5xx is visible.
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);
@@ -99,19 +100,22 @@ async fn health() -> impl IntoResponse {
     StatusCode::OK
 }
 
-/// Proxy `GET /res/v1/web/search` to the Brave Search API.
+/// Proxy a paid Brave Search API endpoint upstream.
 ///
 /// Forwards the query string verbatim, attaches the API key as
 /// a header, then relays the upstream status, content type, and
 /// body back to the caller byte-for-byte.
+///
+/// The path is taken from the request and forwarded unchanged. Only paths in
+/// the catalog are routed here, so an unlisted path is a `404` from the router
+/// and never reaches this handler. That is what keeps the proxy closed: a
+/// caller cannot name an arbitrary upstream path.
 async fn search(
     State(state): State<AppState>,
+    uri: Uri,
     RawQuery(query): RawQuery,
 ) -> Result<Response, AppError> {
-    let url = format!(
-        "{}{WEB_SEARCH_PATH}",
-        state.config.brave_search_api_base_url
-    );
+    let url = format!("{}{}", state.config.brave_search_api_base_url, uri.path());
     let url = match query.as_deref().filter(|q| !q.is_empty()) {
         Some(query) => format!("{url}?{query}"),
         None => url,
@@ -285,6 +289,76 @@ mod tests {
             app(config, None).await,
             Err(AppError::InvalidConfig(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn each_endpoint_answers_a_cold_402_at_its_own_price() {
+        let config = test_config("http://upstream.invalid".to_string()).without_mpp();
+        let app = app(config, None).await.unwrap();
+
+        for endpoint in endpoints::ENDPOINTS {
+            let response = app
+                .clone()
+                .oneshot(request_for(endpoint.path, Rail::None))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::PAYMENT_REQUIRED,
+                "{}",
+                endpoint.path
+            );
+            let header = response
+                .headers()
+                .get("payment-required")
+                .expect("the x402 challenge is advertised");
+            let challenge = x402::decode_challenge(header);
+            let advertised = challenge["accepts"][0]["amount"].as_str().unwrap();
+            assert_eq!(
+                advertised,
+                endpoint.price_base_units.to_string(),
+                "{}",
+                endpoint.path
+            );
+        }
+    }
+
+    /// Paying one endpoint's price does not buy a dearer one. The payment is
+    /// well formed and accepts an offer we really do advertise, just not for the
+    /// path it is sent to, so only the per-path lookup refuses it.
+    #[tokio::test]
+    async fn a_cheap_endpoints_payment_does_not_buy_a_dear_one() {
+        let config = test_config("http://upstream.invalid".to_string()).without_mpp();
+        let app = app(config, None).await.unwrap();
+
+        let signature = x402::test_payment_signature(
+            &Config::for_tests(),
+            "/res/v1/suggest/search",
+            serde_json::json!({}),
+        );
+        let request = Request::builder()
+            .uri("/res/v1/web/search?q=rust")
+            .header("payment-signature", signature)
+            .body(Body::empty())
+            .unwrap();
+
+        // Refused before the facilitator is consulted, which is why an
+        // unreachable facilitator here still yields a 402 rather than a 502.
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn an_unsold_endpoint_is_404_not_a_payable_402() {
+        let config = test_config("http://upstream.invalid".to_string()).without_mpp();
+        let app = app(config, None).await.unwrap();
+
+        // The Answers API is deliberately not sold.
+        let response = app
+            .oneshot(request_for("/res/v1/chat/completions", Rail::None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
