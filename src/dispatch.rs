@@ -57,13 +57,15 @@ fn classify(headers: &HeaderMap) -> Rail {
 ///
 /// A rail that cannot produce its challenge is left out, so the `402` still
 /// advertises whatever the other rail offers.
-fn cold_402(ctx: &Context, resource: &str, method: &Method) -> Response {
+fn cold_402(ctx: &Context, resource: &str, method: &Method, path: &str) -> Response {
     let mut response = StatusCode::PAYMENT_REQUIRED.into_response();
     let challenges = [
         ctx.x402
             .as_ref()
             .and_then(|client| x402::challenge(client, resource, method)),
-        ctx.mpp.as_ref().and_then(mpp::challenge),
+        ctx.mpp
+            .as_ref()
+            .and_then(|client| mpp::challenge(client, path)),
     ];
     for (name, value) in challenges.into_iter().flatten() {
         response.headers_mut().insert(name, value);
@@ -129,7 +131,7 @@ pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Nex
         Rail::None => {}
     }
     // Nothing here can pay: no proof, or proof on a rail the deployment disables.
-    cold_402(&ctx, &absolute_uri(&req), req.method())
+    cold_402(&ctx, &absolute_uri(&req), req.method(), req.uri().path())
 }
 
 /// Reconstruct the absolute URL the client requested for the cold `402`'s
@@ -277,6 +279,7 @@ mod tests {
             &ctx,
             "https://bx402.example.com/res/v1/web/search?q=rust",
             &Method::GET,
+            crate::WEB_SEARCH_PATH,
         );
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
@@ -317,7 +320,7 @@ mod tests {
         let ctx = context(&Config::for_tests().without_mpp(), None)
             .await
             .unwrap();
-        let response = cold_402(&ctx, resource, &Method::GET);
+        let response = cold_402(&ctx, resource, &Method::GET, crate::WEB_SEARCH_PATH);
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
         assert!(response.headers().contains_key("payment-required"));
         assert!(!response.headers().contains_key(header::WWW_AUTHENTICATE));
@@ -328,7 +331,7 @@ mod tests {
             .with_mpp_rpc_url(rpc.uri())
             .without_x402();
         let ctx = context(&config, None).await.unwrap();
-        let response = cold_402(&ctx, resource, &Method::GET);
+        let response = cold_402(&ctx, resource, &Method::GET, crate::WEB_SEARCH_PATH);
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
         assert!(!response.headers().contains_key("payment-required"));
         assert!(response.headers().contains_key(header::WWW_AUTHENTICATE));

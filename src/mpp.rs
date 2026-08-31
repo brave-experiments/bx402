@@ -7,6 +7,8 @@
 //! Unlike x402 there is no facilitator service behind this rail: the `mpp` SDK
 //! verifies a credential and settles it on Tempo in the same call.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
@@ -26,6 +28,7 @@ use mpp::protocol::methods::tempo::{PATH_USD, TEMPO_TX_TYPE_ID, TempoNetwork};
 use mpp::server::{ErrorCode, Mpp, TempoChargeMethod, TempoConfig, TempoProvider, tempo};
 use tempo_primitives::transaction::AASigned;
 
+use crate::endpoints;
 use crate::error::json_error;
 use crate::screener::RestrictedAddressScreener;
 use crate::{AppError, config::MppConfig};
@@ -42,11 +45,6 @@ const REALM: &str = "bx402";
 
 /// The EVM treasury address that receives MPP payments (the challenge recipient).
 const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
-
-/// Flat price per request in base units of pathUSD (6 decimals, so `5_000` =
-/// 0.005). The x402 rail charges the same 0.005 through its own
-/// `PRICE_USDC_BASE_UNITS`. A price change edits both consts.
-const PRICE_USD_BASE_UNITS: u64 = 5_000;
 
 /// How long to wait for the startup chain-id query before giving up.
 const CHAIN_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -65,10 +63,16 @@ pub(crate) fn has_credential(headers: &HeaderMap) -> bool {
 /// the client replies with `Authorization: Payment <credential>`). Minted per
 /// request because every challenge is HMAC-signed and expires. `None` if the
 /// challenge cannot be built or encoded, leaving the `402` advertising x402 alone.
-pub(crate) fn challenge(client: &Client) -> Option<(HeaderName, HeaderValue)> {
+pub(crate) fn challenge(client: &Client, path: &str) -> Option<(HeaderName, HeaderValue)> {
+    // Challenge this endpoint's price and no other. A client offered every price
+    // at once could pay the cheapest and call the dearest.
+    let Some(charge) = client.charges.get(path) else {
+        tracing::error!(path, "no mpp charge for a paid path");
+        return None;
+    };
     let value = client
         .handler
-        .charge_challenge_with_options(&client.charge, None, None)
+        .charge_challenge_with_options(charge, None, None)
         .and_then(|challenge| challenge.to_header())
         .ok()
         .and_then(|value| HeaderValue::from_str(&value).ok());
@@ -85,9 +89,14 @@ pub(crate) fn challenge(client: &Client) -> Option<(HeaderName, HeaderValue)> {
 #[derive(Clone)]
 pub(crate) struct Client {
     handler: Handler,
-    /// Built once at startup. Challenges advertise this exact value and
-    /// credentials are verified against it, so the two can never disagree.
-    charge: ChargeRequest,
+    /// One charge per paid path, built once at startup. A path's challenge
+    /// advertises its own charge and a credential is verified against that same
+    /// charge, so the two can never disagree and no path is payable at
+    /// another's price.
+    ///
+    /// Shared rather than owned: axum clones this client into every request, so
+    /// an owned table would be deep-copied per request.
+    charges: Arc<HashMap<&'static str, ChargeRequest>>,
 }
 
 /// Build the MPP client for the configured RPC endpoint.
@@ -127,14 +136,23 @@ pub(crate) async fn client(rail: &MppConfig, allow_testnet: bool) -> Result<Clie
     .secret_key(&rail.secret_key);
     let handler =
         Handler::create(builder).map_err(|err| AppError::InvalidConfig(format!("MPP: {err}")))?;
-    let charge = ChargeRequest {
-        amount: PRICE_USD_BASE_UNITS.to_string(),
-        currency: PATH_USD.to_string(),
-        recipient: Some(PAY_TO_EVM.to_string()),
-        method_details: Some(json!({ "chainId": chain_id })),
-        ..Default::default()
-    };
-    Ok(Client { handler, charge })
+    let charges = endpoints::ENDPOINTS
+        .iter()
+        .map(|endpoint| {
+            let charge = ChargeRequest {
+                amount: endpoint.price_base_units.to_string(),
+                currency: PATH_USD.to_string(),
+                recipient: Some(PAY_TO_EVM.to_string()),
+                method_details: Some(json!({ "chainId": chain_id })),
+                ..Default::default()
+            };
+            (endpoint.path, charge)
+        })
+        .collect();
+    Ok(Client {
+        handler,
+        charges: Arc::new(charges),
+    })
 }
 
 /// The chain id the RPC endpoint reports for itself (`eth_chainId`).
@@ -181,8 +199,9 @@ async fn get_chain_id(rpc_url: &str) -> Result<u64, AppError> {
 ///
 /// A credential only verifies against a challenge this service issued: the SDK
 /// recomputes the challenge id (an HMAC under our secret key) and checks the
-/// echoed charge against [`Client::charge`], so a credential minted for another
-/// amount, currency, or recipient is refused.
+/// echoed charge against the entry in [`Client::charges`] for the path being
+/// called, so a credential minted for another amount, currency, or recipient
+/// is refused.
 pub(crate) async fn handle(
     client: Client,
     screener: Option<RestrictedAddressScreener>,
@@ -208,11 +227,16 @@ pub(crate) async fn handle(
         return denied;
     }
 
+    // Verify against the charge for the path being called, so a credential minted
+    // for a cheaper endpoint does not pay for this one.
+    let Some(charge) = client.charges.get(req.uri().path()) else {
+        return payment_rejected();
+    };
     // A Tempo RPC we cannot reach is our failure, not the client's, so it is a 502
     // rather than a 402.
     let receipt = match client
         .handler
-        .verify_credential_with_expected_request(&credential, &client.charge)
+        .verify_credential_with_expected_request(&credential, charge)
         .await
     {
         Ok(receipt) => receipt,
@@ -333,10 +357,19 @@ async fn credential_header(config: &Config, payload: PaymentPayload) -> String {
         .expect("test config builds the mpp client");
     let challenge = client
         .handler
-        .charge_challenge_with_options(&client.charge, None, None)
+        .charge_challenge_with_options(test_charge(&client, crate::WEB_SEARCH_PATH), None, None)
         .expect("the challenge builds");
     let credential = PaymentCredential::new(challenge.to_echo(), payload);
     mpp::protocol::core::format_authorization(&credential).expect("the credential formats")
+}
+
+/// The charge a client collects for one paid path.
+#[cfg(test)]
+fn test_charge<'a>(client: &'a Client, path: &str) -> &'a ChargeRequest {
+    client
+        .charges
+        .get(path)
+        .unwrap_or_else(|| panic!("{path} is a paid endpoint"))
 }
 
 /// A credential whose payload says the client already broadcast the transfer.
@@ -472,7 +505,8 @@ mod tests {
         let client = client_on(&Config::for_tests(), MODERATO_CHAIN_ID)
             .await
             .unwrap();
-        let (name, value) = challenge(&client).expect("the challenge builds");
+        let (name, value) =
+            challenge(&client, crate::WEB_SEARCH_PATH).expect("the challenge builds");
         assert_eq!(name, header::WWW_AUTHENTICATE);
 
         // The header parses back to a signed, expiring challenge for the same
@@ -482,7 +516,7 @@ mod tests {
         assert!(!parsed.id.is_empty());
         assert!(parsed.expires.is_some());
 
-        let expected = &client.charge;
+        let expected = test_charge(&client, crate::WEB_SEARCH_PATH);
         let advertised: ChargeRequest = parsed.request.decode().unwrap();
         assert_eq!(advertised.amount, expected.amount);
         assert_eq!(advertised.currency, expected.currency);
@@ -491,11 +525,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn each_endpoint_is_charged_at_its_own_price() {
+        let client = client_on(&Config::for_tests(), MODERATO_CHAIN_ID)
+            .await
+            .unwrap();
+
+        assert_eq!(test_charge(&client, "/res/v1/web/search").amount, "5000");
+        assert_eq!(test_charge(&client, "/res/v1/suggest/search").amount, "500");
+    }
+
+    #[tokio::test]
     async fn the_charge_follows_the_chain_and_pins_the_price() {
         for chain in [MODERATO_CHAIN_ID, TEMPO_CHAIN_ID] {
-            let request = client_on(&Config::for_tests(), chain).await.unwrap().charge;
+            let client = client_on(&Config::for_tests(), chain).await.unwrap();
+            let request = test_charge(&client, crate::WEB_SEARCH_PATH);
 
-            assert_eq!(request.amount, PRICE_USD_BASE_UNITS.to_string(), "{chain}");
+            assert_eq!(request.amount, "5000", "{chain}");
             assert_eq!(
                 request.currency, "0x20c0000000000000000000000000000000000000",
                 "{chain}"
