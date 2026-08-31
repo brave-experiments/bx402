@@ -99,9 +99,38 @@ verifying an MPP credential is what settles it. Only the payer needs funding.
    MPP clients print the `Payment-Receipt` header, so look the transaction up at
    `https://explore.testnet.tempo.xyz/receipt/<transaction>`.
 
+## Endpoints
+
+Every endpoint below is payable on both rails. Prices track Brave's published rates at
+cost, in base units (5000 = $0.005). Brave's rate card names a price for Web Search and
+LLM Context, Autosuggest, and Spellcheck; the other search endpoints are charged the Web
+rate.
+
+| Endpoint                       | Base units | Brave rate |
+| ------------------------------ | ---------- | ---------- |
+| `/res/v1/web/search`           | 5000       | $5/1k      |
+| `/res/v1/llm/context`          | 5000       | $5/1k      |
+| `/res/v1/news/search`          | 5000       | $5/1k      |
+| `/res/v1/videos/search`        | 5000       | $5/1k      |
+| `/res/v1/images/search`        | 5000       | $5/1k      |
+| `/res/v1/summarizer/search`    | 5000       | $5/1k      |
+| `/res/v1/local/place_search`   | 5000       | $5/1k      |
+| `/res/v1/local/pois`           | 5000       | $5/1k      |
+| `/res/v1/local/descriptions`   | 5000       | $5/1k      |
+| `/res/v1/suggest/search`       | 500        | $5/10k     |
+| `/res/v1/spellcheck/search`    | 500        | $5/10k     |
+
+A path outside this table is a `404`, never a payable `402`, so the proxy forwards only
+the endpoints it sells. The Answers API (`/res/v1/chat/completions`) is not among them: it
+bills per query and per token, which one fixed price in a `402` cannot express.
+
+A payment is checked against the price of the path it is sent to, so a credential bought
+for Autosuggest does not pay for a web search.
+
 ## Networks
 
-Both rails charge 5000 base units (0.005 of a six decimal token) to the same treasury.
+Both rails charge the same price for the same endpoint, to the same treasury, in base
+units of a six decimal token. See [Endpoints](#endpoints) for the per-endpoint price.
 
 | Rail | Mainnet             | Testnet                      | Asset   |
 | ---- | ------------------- | ---------------------------- | ------- |
