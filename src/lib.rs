@@ -21,6 +21,7 @@ use axum::{
 
 mod config;
 mod dispatch;
+mod endpoints;
 mod error;
 mod mpp;
 mod screener;
