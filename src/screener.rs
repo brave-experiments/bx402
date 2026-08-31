@@ -99,6 +99,9 @@ impl RestrictedAddressScreener {
     /// A payment with no identifier to screen is refused like a listed one,
     /// with the rail's `rejected` response. A screening failure is logged and
     /// refused with the shared `503`.
+    // Both rails move this Err straight into their own return value, so the
+    // large response never travels up a `?` chain the way the lint assumes.
+    #[allow(clippy::result_large_err)]
     pub(crate) async fn require_allowed(
         &self,
         identifier: Option<String>,
