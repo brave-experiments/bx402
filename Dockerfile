@@ -19,9 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # Copy the binary from the builder stage
 COPY --from=builder /app/target/release/bx402 /usr/local/bin/bx402
 
-# Expose the port
+# Expose the traffic port and the metrics port. Only the first should ever be
+# reachable from outside the network.
 EXPOSE 8080
+EXPOSE 8090
 
-# Run unprivileged: the proxy needs no root and binds 8080 (>1024)
+# Run unprivileged: the proxy needs no root and binds 8080 and 8090 (>1024)
 USER bx402
 ENTRYPOINT ["bx402"]

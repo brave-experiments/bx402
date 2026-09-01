@@ -1,5 +1,7 @@
 //! Binary entry point for the `bx402` service.
 
+use std::sync::Arc;
+
 #[tokio::main]
 async fn main() {
     if let Err(err) = run().await {
@@ -19,6 +21,9 @@ async fn run() -> anyhow::Result<()> {
     init_tracing();
 
     tracing::info!("{}", bx402::banner());
+
+    // Built before anything that records into it.
+    let metrics = Arc::new(bx402::Metrics::new());
 
     let config = bx402::Config::from_env()?;
     tracing::info!("brave search api: {}", config.brave_search_api_base_url);
@@ -41,7 +46,12 @@ async fn run() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     tracing::info!("listening on {}", listener.local_addr()?);
 
-    axum::serve(listener, app).await?;
+    // Traffic and metrics are served on separate listeners, so the public port
+    // never exposes the metrics. A failure on either ends startup.
+    tokio::try_join!(
+        async { axum::serve(listener, app).await },
+        bx402::serve_metrics(metrics),
+    )?;
     Ok(())
 }
 

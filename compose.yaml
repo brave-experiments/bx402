@@ -3,6 +3,9 @@ services:
     build: .
     ports:
       - "8080:8080"
+      # Metrics. Published here for local scraping; a real deployment keeps this
+      # port inside the network.
+      - "8090:8090"
     environment:
       BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY}
       X402_FACILITATOR_URL: http://facilitator:8080

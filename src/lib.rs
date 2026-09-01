@@ -23,11 +23,13 @@ mod config;
 mod dispatch;
 mod endpoints;
 mod error;
+mod metrics;
 mod mpp;
 mod screener;
 mod x402;
 pub use config::{Config, MppConfig, X402Config};
 pub use error::AppError;
+pub use metrics::{Metrics, serve as serve_metrics};
 pub use screener::{RestrictedAddressScreener, Status, init as init_screener};
 
 /// Shared application state, cloned into each request handler.

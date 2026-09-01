@@ -40,6 +40,10 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["default-htt
 # legacy rustls connector, so no vulnerable TLS stack.
 aws-config = "1"
 base64 = "0.23"
+# Prometheus metrics. The registry is ours to hold and pass around rather than a
+# global the whole process shares, so every test builds its own and reads exact
+# values out of it.
+prometheus-client = "0.25"
 
 [dev-dependencies]
 http-body-util = "=0.1.4"
