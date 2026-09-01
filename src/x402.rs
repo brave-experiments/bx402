@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     extract::Request,
@@ -18,6 +19,7 @@ use x402_axum::facilitator_client::FacilitatorClient;
 
 use crate::endpoints;
 use crate::error::json_error;
+use crate::metrics::{Metrics, outcome, step};
 use crate::screener::RestrictedAddressScreener;
 use crate::{AppError, config::X402Config};
 
@@ -49,6 +51,9 @@ const PAYMENT_REQUIRED_HEADER: &str = "payment-required";
 
 /// The EVM treasury address that receives x402 payments (`payTo`).
 const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
+
+/// What this rail calls itself in metrics.
+const RAIL: &str = "x402";
 
 /// Returns `true` if the request carries an x402 V2 payment proof.
 pub(crate) fn has_payment(headers: &HeaderMap) -> bool {
@@ -189,11 +194,19 @@ pub(crate) fn client(rail: &X402Config, allow_testnet: bool) -> Result<Client, A
 pub(crate) async fn handle(
     client: Client,
     screener: Option<RestrictedAddressScreener>,
+    metrics: Arc<Metrics>,
+    endpoint: &'static str,
     req: Request,
     next: Next,
 ) -> Response {
+    // Every exit below records how the payment ended, so no path goes uncounted.
+    let ended = |outcome, response| {
+        metrics.record_payment(RAIL, endpoint, outcome);
+        response
+    };
+
     let Some((payload, accepted, payer)) = decode_payment(req.headers()) else {
-        return payment_rejected(MALFORMED_PAYMENT);
+        return ended(outcome::MALFORMED, payment_rejected(MALFORMED_PAYMENT));
     };
 
     // The payer must accept an offer we advertised for the path it is calling, so
@@ -201,13 +214,13 @@ pub(crate) async fn handle(
     // endpoint's cheaper offer. Refused like any other payment we decline.
     let offer = client
         .accepts
-        .get(req.uri().path())
+        .get(endpoint)
         .and_then(|offers| offers.iter().find(|offer| **offer == accepted));
     let Some(offer) = offer else {
-        return payment_rejected(GENERIC_REJECTION);
+        return ended(outcome::NO_OFFER, payment_rejected(GENERIC_REJECTION));
     };
     let Some(request) = verify_request(&payload, offer) else {
-        return payment_rejected(MALFORMED_PAYMENT);
+        return ended(outcome::MALFORMED, payment_rejected(MALFORMED_PAYMENT));
     };
 
     // Screen the payer before any facilitator or upstream call, so a blocked signer
@@ -217,36 +230,53 @@ pub(crate) async fn handle(
             .require_allowed(payer, payment_rejected(GENERIC_REJECTION))
             .await
     {
-        return denied;
+        return ended(outcome::SCREENED_OUT, denied);
     }
 
     // Verify before doing any work. A facilitator we cannot reach is our failure,
     // not the client's, so it is a 502 rather than a 402.
-    match client.facilitator.verify(&request).await {
+    let started = Instant::now();
+    let verified = client.facilitator.verify(&request).await;
+    metrics.record_payment_step(RAIL, step::VERIFY, started.elapsed());
+    match verified {
         Ok(response) if is_valid(&response) => {}
-        Ok(_) => return payment_rejected(GENERIC_REJECTION),
+        Ok(_) => return ended(outcome::REFUSED, payment_rejected(GENERIC_REJECTION)),
         Err(err) => {
             tracing::error!(error = ?err, "x402 facilitator verify failed");
-            return gateway_error("payment facilitator unavailable");
+            return ended(
+                outcome::NETWORK_UNAVAILABLE,
+                gateway_error("payment facilitator unavailable"),
+            );
         }
     }
 
     let response = next.run(req).await;
     if !response.status().is_success() {
-        return response;
+        return ended(outcome::UPSTREAM_FAILED, response);
     }
 
     // The value we verified settles unchanged. Withhold the (already produced)
     // body unless it settles.
-    match client.facilitator.settle(&request).await {
-        Ok(receipt) if settled(&receipt) => attach_receipt(response, &receipt),
+    let started = Instant::now();
+    let settlement = client.facilitator.settle(&request).await;
+    metrics.record_payment_step(RAIL, step::SETTLE, started.elapsed());
+    match settlement {
+        Ok(receipt) if settled(&receipt) => {
+            metrics.record_payment(RAIL, endpoint, outcome::SETTLED);
+            // The price comes from the catalog, so what we count as earned is
+            // what we advertised rather than anything the payer said.
+            if let Some(sold) = endpoints::find(endpoint) {
+                metrics.record_charge(RAIL, endpoint, sold.price_base_units);
+            }
+            attach_receipt(response, &receipt)
+        }
         Ok(receipt) => {
             tracing::error!(?receipt, "x402 facilitator reported settlement failure");
-            gateway_error(SETTLE_FAILED)
+            ended(outcome::SETTLE_FAILED, gateway_error(SETTLE_FAILED))
         }
         Err(err) => {
             tracing::error!(error = ?err, "x402 facilitator settle failed");
-            gateway_error(SETTLE_FAILED)
+            ended(outcome::SETTLE_FAILED, gateway_error(SETTLE_FAILED))
         }
     }
 }

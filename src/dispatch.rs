@@ -19,8 +19,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use std::sync::Arc;
+
+use crate::metrics::{Metrics, challenge};
 use crate::screener::RestrictedAddressScreener;
-use crate::{AppError, Config, mpp, x402};
+use crate::{AppError, Config, metrics, mpp, x402};
 
 /// The payment rail a request is attempting, determined solely by which payment
 /// headers it carries.
@@ -87,6 +90,8 @@ pub(crate) struct Context {
     pub(crate) mpp: Option<mpp::Client>,
     /// Payer screener, shared by every rail. `None` when screening is not configured.
     pub(crate) screener: Option<RestrictedAddressScreener>,
+    /// Where every rail records what happened.
+    pub(crate) metrics: Arc<Metrics>,
 }
 
 /// Assemble the dispatch context from config and the already-built screener (the
@@ -95,6 +100,7 @@ pub(crate) struct Context {
 pub(crate) async fn context(
     config: &Config,
     screener: Option<RestrictedAddressScreener>,
+    metrics: Arc<Metrics>,
 ) -> Result<Context, AppError> {
     // x402 first: a bad facilitator URL is reported before any RPC traffic.
     let x402 = match &config.x402 {
@@ -109,6 +115,7 @@ pub(crate) async fn context(
         x402,
         mpp,
         screener,
+        metrics,
     })
 }
 
@@ -116,21 +123,31 @@ pub(crate) async fn context(
 /// headers and route each state to its rail. The router decides which rail runs,
 /// never how a rail verifies.
 pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Next) -> Response {
-    match classify(req.headers()) {
-        Rail::Both => return collision_400(),
+    let endpoint = metrics::endpoint_label(req.uri().path());
+    let metrics = ctx.metrics.clone();
+    // Whichever rail runs answers for itself; what is left here is the request
+    // that never reached one, and the reason it did not.
+    let reason = match classify(req.headers()) {
+        Rail::Both => {
+            metrics.record_challenge(endpoint, challenge::COLLISION);
+            return collision_400();
+        }
         Rail::X402 => {
             if let Some(client) = ctx.x402 {
-                return x402::handle(client, ctx.screener, req, next).await;
+                return x402::handle(client, ctx.screener, metrics, endpoint, req, next).await;
             }
+            challenge::RAIL_DISABLED
         }
         Rail::Mpp => {
             if let Some(client) = ctx.mpp {
                 return mpp::handle(client, ctx.screener, req, next).await;
             }
+            challenge::RAIL_DISABLED
         }
-        Rail::None => {}
-    }
+        Rail::None => challenge::NO_PAYMENT,
+    };
     // Nothing here can pay: no proof, or proof on a rail the deployment disables.
+    metrics.record_challenge(endpoint, reason);
     cold_402(&ctx, &absolute_uri(&req), req.method(), req.uri().path())
 }
 
@@ -199,6 +216,12 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use http_body_util::BodyExt;
+
+    /// [`context`] with a registry no test reads, for the cases that assert on
+    /// the challenge rather than on what was recorded.
+    async fn test_context(config: &Config) -> Result<Context, AppError> {
+        context(config, None, Arc::new(Metrics::new())).await
+    }
 
     /// Build a `HeaderMap` from `(name, value)` pairs.
     fn header_map(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -274,7 +297,7 @@ mod tests {
     async fn cold_402_advertises_both_rails() {
         let rpc = mpp::test_rpc().await;
         let config = Config::for_tests().with_mpp_rpc_url(rpc.uri());
-        let ctx = context(&config, None).await.unwrap();
+        let ctx = test_context(&config).await.unwrap();
         let response = cold_402(
             &ctx,
             "https://bx402.example.com/res/v1/web/search?q=rust",
@@ -317,7 +340,7 @@ mod tests {
 
         // x402 only. No RPC server exists anywhere in this half, which also
         // proves a disabled MPP rail skips the startup chain query.
-        let ctx = context(&Config::for_tests().without_mpp(), None)
+        let ctx = test_context(&Config::for_tests().without_mpp())
             .await
             .unwrap();
         let response = cold_402(&ctx, resource, &Method::GET, crate::WEB_SEARCH_PATH);
@@ -330,7 +353,7 @@ mod tests {
         let config = Config::for_tests()
             .with_mpp_rpc_url(rpc.uri())
             .without_x402();
-        let ctx = context(&config, None).await.unwrap();
+        let ctx = test_context(&config).await.unwrap();
         let response = cold_402(&ctx, resource, &Method::GET, crate::WEB_SEARCH_PATH);
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
         assert!(!response.headers().contains_key("payment-required"));

@@ -47,6 +47,79 @@ const DURATION_BUCKETS: [f64; 11] = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8
 /// the set we serve, so a request cannot mint a series of its own.
 const OTHER: &str = "other";
 
+/// Why a request was answered with a challenge instead of served.
+pub(crate) mod challenge {
+    /// The request carried no payment proof at all.
+    pub(crate) const NO_PAYMENT: &str = "no_payment";
+    /// The proof was for a rail this deployment has turned off.
+    pub(crate) const RAIL_DISABLED: &str = "rail_disabled";
+    /// The request carried proof for both rails at once.
+    pub(crate) const COLLISION: &str = "collision";
+}
+
+/// How a payment ended: the complete set of outcomes, whichever rail reports
+/// them. Some values only ever come from one rail; they live together so the
+/// whole vocabulary can be read, and checked against, in one place.
+///
+/// Every refusal looks the same to the client on purpose, so this is the only
+/// place the reasons stay apart.
+pub(crate) mod outcome {
+    /// Paid, and the caller got what they paid for.
+    pub(crate) const SETTLED: &str = "settled";
+    /// The proof could not be read at all.
+    pub(crate) const MALFORMED: &str = "malformed";
+    /// The proof was readable but accepted no offer we made for this path.
+    pub(crate) const NO_OFFER: &str = "no_offer";
+    /// The payment was read and understood, and did not verify.
+    pub(crate) const REFUSED: &str = "refused";
+    /// The payer did not clear address screening.
+    pub(crate) const SCREENED_OUT: &str = "screened_out";
+    /// We could not reach the facilitator or the chain.
+    pub(crate) const NETWORK_UNAVAILABLE: &str = "network_unavailable";
+    /// Verified, then could not be settled.
+    pub(crate) const SETTLE_FAILED: &str = "settle_failed";
+    /// Paid for, but the upstream search failed, so nothing was charged.
+    pub(crate) const UPSTREAM_FAILED: &str = "upstream_failed";
+}
+
+/// The steps of a payment worth timing separately. Which steps a rail reports
+/// depends on whether it can check a payment without moving money.
+pub(crate) mod step {
+    /// Checking a payment without moving money.
+    pub(crate) const VERIFY: &str = "verify";
+    /// Moving the money.
+    pub(crate) const SETTLE: &str = "settle";
+}
+
+/// One challenge the service issued.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ChallengeLabels {
+    endpoint: &'static str,
+    reason: &'static str,
+}
+
+/// One payment, and how it ended.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct PaymentLabels {
+    rail: &'static str,
+    endpoint: &'static str,
+    outcome: &'static str,
+}
+
+/// One step of a payment, for its timing.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct StepLabels {
+    rail: &'static str,
+    step: &'static str,
+}
+
+/// One endpoint on one rail, for the money it took.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ChargeLabels {
+    rail: &'static str,
+    endpoint: &'static str,
+}
+
 /// One request the service answered.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct RequestLabels {
@@ -90,6 +163,10 @@ pub struct Metrics {
     request_duration: Family<RouteLabels, Histogram, fn() -> Histogram>,
     upstream_requests: Family<UpstreamLabels, Counter>,
     upstream_duration: Family<EndpointLabels, Histogram, fn() -> Histogram>,
+    challenges: Family<ChallengeLabels, Counter>,
+    payments: Family<PaymentLabels, Counter>,
+    payment_step_duration: Family<StepLabels, Histogram, fn() -> Histogram>,
+    charged_base_units: Family<ChargeLabels, Counter>,
 }
 
 impl Metrics {
@@ -135,13 +212,95 @@ impl Metrics {
             upstream_duration.clone(),
         );
 
+        let challenges = Family::default();
+        registry.register(
+            "challenges",
+            "Payment challenges issued, by endpoint and reason",
+            challenges.clone(),
+        );
+
+        let payments = Family::default();
+        registry.register(
+            "payments",
+            "Payments attempted, by rail, endpoint and how they ended",
+            payments.clone(),
+        );
+
+        let payment_step_duration =
+            Family::new_with_constructor(duration_histogram as fn() -> Histogram);
+        registry.register(
+            "payment_step_duration_seconds",
+            "Time for one step of a payment, by rail",
+            payment_step_duration.clone(),
+        );
+
+        let charged_base_units = Family::default();
+        registry.register(
+            "charged_base_units",
+            "Base units of currency charged for settled payments",
+            charged_base_units.clone(),
+        );
+
         Self {
             registry,
             requests,
             request_duration,
             upstream_requests,
             upstream_duration,
+            challenges,
+            payments,
+            payment_step_duration,
+            charged_base_units,
         }
+    }
+
+    /// Record one challenge the service issued instead of serving the request.
+    pub(crate) fn record_challenge(&self, endpoint: &'static str, reason: &'static str) {
+        self.challenges
+            .get_or_create(&ChallengeLabels { endpoint, reason })
+            .inc();
+    }
+
+    /// Record how one payment ended.
+    pub(crate) fn record_payment(
+        &self,
+        rail: &'static str,
+        endpoint: &'static str,
+        outcome: &'static str,
+    ) {
+        self.payments
+            .get_or_create(&PaymentLabels {
+                rail,
+                endpoint,
+                outcome,
+            })
+            .inc();
+    }
+
+    /// Record how long one step of a payment took.
+    pub(crate) fn record_payment_step(
+        &self,
+        rail: &'static str,
+        step: &'static str,
+        elapsed: Duration,
+    ) {
+        self.payment_step_duration
+            .get_or_create(&StepLabels { rail, step })
+            .observe(elapsed.as_secs_f64());
+    }
+
+    /// Record the money a settled payment brought in, in the currency's base
+    /// units. Read from the catalog, so it is the price we advertised rather
+    /// than anything the payer stated.
+    pub(crate) fn record_charge(
+        &self,
+        rail: &'static str,
+        endpoint: &'static str,
+        base_units: u64,
+    ) {
+        self.charged_base_units
+            .get_or_create(&ChargeLabels { rail, endpoint })
+            .inc_by(base_units);
     }
 
     /// Record one request the service answered.

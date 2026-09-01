@@ -78,7 +78,7 @@ pub async fn app(
     screener: Option<RestrictedAddressScreener>,
     metrics: Arc<Metrics>,
 ) -> Result<Router, AppError> {
-    let context = dispatch::context(&config, screener).await?;
+    let context = dispatch::context(&config, screener, metrics.clone()).await?;
     let state = AppState {
         // Build fails only if the TLS backend cannot initialize. That is a startup
         // fault like a bad URL or bucket, so it aborts startup rather than panicking.
@@ -616,8 +616,7 @@ mod tests {
     #[tokio::test]
     async fn an_unsold_path_is_counted_without_minting_a_label() {
         let config = test_config("http://upstream.invalid".to_string()).without_mpp();
-        let metrics = Arc::new(Metrics::new());
-        let app = app(config, None, metrics.clone()).await.unwrap();
+        let (app, metrics) = app_recording(config, None).await;
 
         let response = app
             .oneshot(request_for("/res/v1/chat/completions", Rail::None))
@@ -674,6 +673,135 @@ mod tests {
         assert_recorded(
             &metrics,
             r#"bx402_upstream_requests_total{endpoint="/res/v1/web/search",status="connect"} 1"#,
+        );
+    }
+
+    #[tokio::test]
+    async fn challenges_record_why_they_were_issued() {
+        let config = test_config("http://upstream.invalid".to_string());
+        let rpc = crate::mpp::test_rpc().await;
+        let (app, metrics) = app_and_metrics(&rpc, config, None).await;
+
+        for (rail, reason) in [(Rail::None, "no_payment"), (Rail::Both, "collision")] {
+            let _ = app
+                .clone()
+                .oneshot(request_for("/res/v1/web/search?q=rust", rail))
+                .await
+                .unwrap();
+            assert_recorded(
+                &metrics,
+                &format!(
+                    r#"bx402_challenges_total{{endpoint="/res/v1/web/search",reason="{reason}"}} 1"#
+                ),
+            );
+        }
+    }
+
+    /// A payer on a rail this deployment turned off is counted apart from a
+    /// caller who simply did not pay, which is the only way to see clients
+    /// stranded against a disabled rail.
+    #[tokio::test]
+    async fn a_payment_on_a_disabled_rail_is_counted_apart_from_a_cold_request() {
+        let config = test_config("http://upstream.invalid".to_string()).without_x402();
+        let rpc = crate::mpp::test_rpc().await;
+        let (app, metrics) = app_and_metrics(&rpc, config, None).await;
+
+        let response = app
+            .oneshot(request_for("/res/v1/web/search?q=rust", Rail::X402))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        assert_recorded(
+            &metrics,
+            r#"bx402_challenges_total{endpoint="/res/v1/web/search",reason="rail_disabled"} 1"#,
+        );
+    }
+
+    /// Drive one paid x402 request against a facilitator behaving as
+    /// `valid`/`settles` and an upstream answering `upstream_status`, handing
+    /// back what the request recorded.
+    async fn paid_x402(
+        valid: bool,
+        settles: bool,
+        upstream_status: u16,
+    ) -> (axum::response::Response, Arc<Metrics>) {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(WEB_SEARCH_PATH))
+            .respond_with(ResponseTemplate::new(upstream_status).set_body_string("{}"))
+            .mount(&upstream)
+            .await;
+        let facilitator = mock_facilitator(valid, settles).await;
+        let config = config_with(upstream.uri(), facilitator.uri()).without_mpp();
+        let (app, metrics) = app_recording(config, None).await;
+        let response = app.oneshot(paid_request()).await.unwrap();
+        (response, metrics)
+    }
+
+    #[tokio::test]
+    async fn a_settled_payment_records_its_outcome_price_and_step_timings() {
+        let (response, metrics) = paid_x402(true, true, 200).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_payment_outcome(&metrics, "settled");
+        // The catalog price, not anything the payer stated.
+        assert_recorded(
+            &metrics,
+            r#"bx402_charged_base_units_total{rail="x402",endpoint="/res/v1/web/search"} 5000"#,
+        );
+        for step in ["verify", "settle"] {
+            assert_recorded(
+                &metrics,
+                &format!(
+                    r#"bx402_payment_step_duration_seconds_count{{rail="x402",step="{step}"}} 1"#
+                ),
+            );
+        }
+    }
+
+    /// Every way a payment can end badly is counted apart, even though the
+    /// client is told the same thing.
+    #[tokio::test]
+    async fn each_way_a_payment_fails_records_its_own_outcome() {
+        let (response, metrics) = paid_x402(false, true, 200).await;
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_payment_outcome(&metrics, "refused");
+
+        // Verified, then the search failed: relayed as is, and never charged.
+        let (response, metrics) = paid_x402(true, true, 500).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_payment_outcome(&metrics, "upstream_failed");
+        assert_not_recorded(&metrics, r#"bx402_charged_base_units_total{"#);
+
+        // Verified, then settlement declined.
+        let (response, metrics) = paid_x402(true, false, 200).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_payment_outcome(&metrics, "settle_failed");
+    }
+
+    #[tokio::test]
+    async fn a_blocked_payer_records_a_screened_out_payment() {
+        let from = "0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B";
+        let (_s3, screener) = screener_blocking(from).await;
+        let upstream = untouched_upstream().await;
+
+        let (app, metrics) =
+            test_app_and_metrics(test_config(upstream.uri()), Some(screener)).await;
+
+        let response = app.oneshot(paid_request_from(from)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_payment_outcome(&metrics, "screened_out");
+    }
+
+    /// Assert exactly one x402 payment for the web search endpoint ended in
+    /// `outcome`.
+    fn assert_payment_outcome(metrics: &Metrics, outcome: &str) {
+        assert_recorded(
+            metrics,
+            &format!(
+                r#"bx402_payments_total{{rail="x402",endpoint="/res/v1/web/search",outcome="{outcome}"}} 1"#
+            ),
         );
     }
 
