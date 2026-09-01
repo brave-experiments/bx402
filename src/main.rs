@@ -41,7 +41,7 @@ async fn run() -> anyhow::Result<()> {
     let (screener, screening) = bx402::init_screener(&config).await?;
     tracing::info!("restricted address screening: {screening}");
 
-    let app = bx402::app(config, screener).await?;
+    let app = bx402::app(config, screener, metrics.clone()).await?;
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     tracing::info!("listening on {}", listener.local_addr()?);

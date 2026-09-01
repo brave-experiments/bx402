@@ -5,13 +5,14 @@
 //!
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     Router,
+    body::Bytes,
     extract::{RawQuery, State},
     http::{
-        HeaderMap, StatusCode, Uri,
+        HeaderMap, HeaderValue, StatusCode, Uri,
         header::{ACCEPT, CONTENT_TYPE},
     },
     middleware,
@@ -41,7 +42,12 @@ pub use screener::{RestrictedAddressScreener, Status, init as init_screener};
 struct AppState {
     client: reqwest::Client,
     config: Arc<Config>,
+    metrics: Arc<Metrics>,
 }
+
+/// Liveness probe path, kept in one place so the route and its metric label
+/// cannot drift apart.
+pub(crate) const HEALTH_PATH: &str = "/health";
 
 /// The paid path tests reach for when any one endpoint will do. Production
 /// routing reads every path from the catalog instead.
@@ -70,6 +76,7 @@ pub fn banner() -> String {
 pub async fn app(
     config: Config,
     screener: Option<RestrictedAddressScreener>,
+    metrics: Arc<Metrics>,
 ) -> Result<Router, AppError> {
     let context = dispatch::context(&config, screener).await?;
     let state = AppState {
@@ -81,18 +88,22 @@ pub async fn app(
             .build()
             .map_err(|err| AppError::InvalidConfig(format!("search client: {err}")))?,
         config: Arc::new(config),
+        metrics: metrics.clone(),
     };
     // `route_layer` runs the dispatch gate only when the method matches, so
     // an unsupported method gets the plain 405 instead of a payable 402
     // whose search would then be refused.
     let paid = get(search).route_layer(middleware::from_fn_with_state(context, dispatch::dispatch));
-    let mut router = Router::new().route("/health", get(health));
+    let mut router = Router::new().route(HEALTH_PATH, get(health));
     for endpoint in endpoints::ENDPOINTS {
         router = router.route(endpoint.path, paid.clone());
     }
     let router = router
         // Span and log each request; failures log at `error`, so a 5xx is visible.
         .layer(tower_http::trace::TraceLayer::new_for_http())
+        // Outermost, so the timing covers everything the service does and the
+        // count includes requests that match no route.
+        .layer(middleware::from_fn_with_state(metrics, metrics::measure))
         .with_state(state);
     Ok(router)
 }
@@ -123,6 +134,34 @@ async fn search(
         None => url,
     };
 
+    // Time the whole exchange, body included, since the body is most of it.
+    let endpoint = metrics::endpoint_label(uri.path());
+    let started = Instant::now();
+    let fetched = fetch(&state, url).await;
+    let elapsed = started.elapsed();
+    let upstream_status = match &fetched {
+        Ok((status, _, _)) => status.as_str(),
+        Err(err) => transport_failure(err),
+    };
+    state
+        .metrics
+        .record_upstream(endpoint, upstream_status, elapsed);
+
+    let (status, content_type, body) = fetched?;
+
+    let mut headers = HeaderMap::new();
+    if let Some(content_type) = content_type {
+        headers.insert(CONTENT_TYPE, content_type);
+    }
+
+    Ok((status, headers, body).into_response())
+}
+
+/// Fetch one upstream search and read it to the end.
+async fn fetch(
+    state: &AppState,
+    url: String,
+) -> Result<(StatusCode, Option<HeaderValue>, Bytes), reqwest::Error> {
     let upstream = state
         .client
         .get(url)
@@ -133,20 +172,28 @@ async fn search(
 
     let status = upstream.status();
     let content_type = upstream.headers().get(CONTENT_TYPE).cloned();
-    let body = upstream.bytes().await?;
+    Ok((status, content_type, upstream.bytes().await?))
+}
 
-    let mut headers = HeaderMap::new();
-    if let Some(content_type) = content_type {
-        headers.insert(CONTENT_TYPE, content_type);
+/// The kind of failure behind an upstream error, as a label value. A fixed set,
+/// so a failing upstream cannot grow the number of series.
+fn transport_failure(err: &reqwest::Error) -> &'static str {
+    if err.is_timeout() {
+        "timeout"
+    } else if err.is_connect() {
+        "connect"
+    } else if err.is_decode() {
+        "decode"
+    } else {
+        "transport"
     }
-
-    Ok((status, headers, body).into_response())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dispatch::Rail;
+    use crate::metrics::{assert_not_recorded, assert_recorded};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -173,23 +220,51 @@ mod tests {
         }
     }
 
-    /// Build the app for a test against `rpc`, the mock Tempo endpoint
-    /// answering the startup chain query.
-    async fn app_with(
+    /// [`app`] with a registry no test reads, for the cases that assert on
+    /// responses rather than on what was recorded. Returns the `Result` so the
+    /// startup-failure cases can inspect it.
+    async fn build_app(
+        config: Config,
+        screener: Option<RestrictedAddressScreener>,
+    ) -> Result<axum::Router, AppError> {
+        app(config, screener, Arc::new(Metrics::new())).await
+    }
+
+    /// [`build_app`], handing back the registry the app records into. Each call
+    /// builds its own, so recorded values are exact and unaffected by other tests.
+    async fn app_recording(
+        config: Config,
+        screener: Option<RestrictedAddressScreener>,
+    ) -> (axum::Router, Arc<Metrics>) {
+        let metrics = Arc::new(Metrics::new());
+        let router = app(config, screener, metrics.clone()).await.unwrap();
+        (router, metrics)
+    }
+
+    /// [`app_recording`] against `rpc`, the mock Tempo endpoint answering the
+    /// startup chain query.
+    async fn app_and_metrics(
         rpc: &MockServer,
         config: Config,
         screener: Option<RestrictedAddressScreener>,
-    ) -> axum::Router {
-        app(config.with_mpp_rpc_url(rpc.uri()), screener)
-            .await
-            .unwrap()
+    ) -> (axum::Router, Arc<Metrics>) {
+        app_recording(config.with_mpp_rpc_url(rpc.uri()), screener).await
     }
 
-    /// [`app_with`] a throwaway RPC, for tests that never verify an MPP
-    /// payment.
+    /// Build the app against a throwaway RPC, for tests that never verify an MPP
+    /// payment and do not read what was recorded.
     async fn test_app(config: Config, screener: Option<RestrictedAddressScreener>) -> axum::Router {
+        let (router, _metrics) = test_app_and_metrics(config, screener).await;
+        router
+    }
+
+    /// [`test_app`], handing back the registry the app records into.
+    async fn test_app_and_metrics(
+        config: Config,
+        screener: Option<RestrictedAddressScreener>,
+    ) -> (axum::Router, Arc<Metrics>) {
         let rpc = crate::mpp::test_rpc().await;
-        app_with(&rpc, config, screener).await
+        app_and_metrics(&rpc, config, screener).await
     }
 
     /// Start a wiremock server standing in for the x402 facilitator: `POST /verify`
@@ -264,13 +339,22 @@ mod tests {
     /// so the request reaches the dispatch gate in the chosen state. A valid facilitator
     /// backs the x402 rail, so an x402 attempt verifies and settles.
     async fn get_with(config: Config, uri: &str, rail: Rail) -> axum::response::Response {
+        let (response, _metrics) = get_and_metrics(config, uri, rail).await;
+        response
+    }
+
+    /// [`get_with`], handing back the registry the request recorded into.
+    async fn get_and_metrics(
+        config: Config,
+        uri: &str,
+        rail: Rail,
+    ) -> (axum::response::Response, Arc<Metrics>) {
         let facilitator = mock_facilitator(true, true).await;
         let config = config.with_facilitator_url(facilitator.uri());
-        test_app(config, None)
-            .await
-            .oneshot(request_for(uri, rail))
-            .await
-            .unwrap()
+        let rpc = crate::mpp::test_rpc().await;
+        let (app, metrics) = app_and_metrics(&rpc, config, None).await;
+        let response = app.oneshot(request_for(uri, rail)).await.unwrap();
+        (response, metrics)
     }
 
     #[test]
@@ -288,7 +372,7 @@ mod tests {
         );
         // The facilitator is rejected before the MPP chain query, so no RPC is needed.
         assert!(matches!(
-            app(config, None).await,
+            build_app(config, None).await,
             Err(AppError::InvalidConfig(_))
         ));
     }
@@ -296,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn each_endpoint_answers_a_cold_402_at_its_own_price() {
         let config = test_config("http://upstream.invalid".to_string()).without_mpp();
-        let app = app(config, None).await.unwrap();
+        let app = build_app(config, None).await.unwrap();
 
         for endpoint in endpoints::ENDPOINTS {
             let response = app
@@ -331,7 +415,7 @@ mod tests {
     #[tokio::test]
     async fn a_cheap_endpoints_payment_does_not_buy_a_dear_one() {
         let config = test_config("http://upstream.invalid".to_string()).without_mpp();
-        let app = app(config, None).await.unwrap();
+        let app = build_app(config, None).await.unwrap();
 
         let signature = x402::test_payment_signature(
             &Config::for_tests(),
@@ -353,7 +437,7 @@ mod tests {
     #[tokio::test]
     async fn an_unsold_endpoint_is_404_not_a_payable_402() {
         let config = test_config("http://upstream.invalid".to_string()).without_mpp();
-        let app = app(config, None).await.unwrap();
+        let app = build_app(config, None).await.unwrap();
 
         // The Answers API is deliberately not sold.
         let response = app
@@ -368,7 +452,7 @@ mod tests {
         // Built directly, with no mock RPC bound anywhere: a disabled MPP rail
         // must skip the startup chain query entirely.
         let config = test_config("http://upstream.invalid".to_string()).without_mpp();
-        let app = app(config, None).await.unwrap();
+        let app = build_app(config, None).await.unwrap();
 
         let response = app
             .oneshot(request_for("/res/v1/web/search?q=rust", Rail::Mpp))
@@ -406,7 +490,7 @@ mod tests {
         let config = test_config("http://upstream.invalid".to_string())
             .without_x402()
             .without_mpp();
-        let app = app(config, None).await.unwrap();
+        let app = build_app(config, None).await.unwrap();
 
         // Cold, an MPP attempt, and an x402 attempt all get the bare 402, which
         // advertises nothing.
@@ -508,6 +592,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_request_is_counted_with_its_endpoint_method_and_status() {
+        let (response, metrics) = get_and_metrics(
+            test_config("http://upstream.invalid".to_string()),
+            HEALTH_PATH,
+            Rail::None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_recorded(
+            &metrics,
+            r#"bx402_http_requests_total{endpoint="/health",method="GET",status="200"} 1"#,
+        );
+        assert_recorded(
+            &metrics,
+            r#"bx402_http_request_duration_seconds_count{endpoint="/health",method="GET"} 1"#,
+        );
+    }
+
+    /// A path we do not serve is still counted, and its raw text never reaches a
+    /// label, so requests for paths that do not exist cannot grow the series.
+    #[tokio::test]
+    async fn an_unsold_path_is_counted_without_minting_a_label() {
+        let config = test_config("http://upstream.invalid".to_string()).without_mpp();
+        let metrics = Arc::new(Metrics::new());
+        let app = app(config, None, metrics.clone()).await.unwrap();
+
+        let response = app
+            .oneshot(request_for("/res/v1/chat/completions", Rail::None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        assert_recorded(
+            &metrics,
+            r#"bx402_http_requests_total{endpoint="other",method="GET",status="404"} 1"#,
+        );
+        assert_not_recorded(&metrics, "chat/completions");
+    }
+
+    #[tokio::test]
+    async fn an_upstream_error_is_counted_under_its_status() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/res/v1/web/search"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("brave is down"))
+            .mount(&upstream)
+            .await;
+
+        let (response, metrics) = get_and_metrics(
+            test_config(upstream.uri()),
+            "/res/v1/web/search?q=rust",
+            Rail::X402,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        assert_recorded(
+            &metrics,
+            r#"bx402_upstream_requests_total{endpoint="/res/v1/web/search",status="500"} 1"#,
+        );
+        assert_recorded(
+            &metrics,
+            r#"bx402_upstream_duration_seconds_count{endpoint="/res/v1/web/search"} 1"#,
+        );
+    }
+
+    /// An upstream that never answers is counted too, under the kind of failure
+    /// rather than a status it never sent.
+    #[tokio::test]
+    async fn an_unreachable_upstream_is_counted_as_a_transport_failure() {
+        let (response, metrics) = get_and_metrics(
+            test_config("http://127.0.0.1:1".to_string()),
+            "/res/v1/web/search?q=rust",
+            Rail::X402,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+        assert_recorded(
+            &metrics,
+            r#"bx402_upstream_requests_total{endpoint="/res/v1/web/search",status="connect"} 1"#,
+        );
+    }
+
+    #[tokio::test]
     async fn dispatch_routes_by_payment_headers() {
         struct Case {
             name: &'static str,
@@ -564,8 +734,11 @@ mod tests {
         screener: Option<RestrictedAddressScreener>,
         authorization: &str,
     ) -> axum::response::Response {
+        // The mock RPC is bound here, not inside a helper, so it stays alive for
+        // the request. Dropping it early frees its port for another test's mock
+        // to bind, and a verify meant to find nothing there reaches that instead.
         let rpc = crate::mpp::test_rpc().await;
-        let app = app_with(&rpc, config, screener).await;
+        let (app, _metrics) = app_and_metrics(&rpc, config, screener).await;
         let request = Request::builder()
             .uri(format!("{WEB_SEARCH_PATH}?q=rust"))
             .header("authorization", authorization)
