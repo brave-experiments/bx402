@@ -183,3 +183,11 @@ The startup banner reports the outcome:
 restricted address screening: ✓ enabled (bucket=<name>)
 restricted address screening: ✗ disabled (RESTRICTED_ADDRESS_S3_BUCKET not set)
 ```
+
+## Metrics
+
+Prometheus metrics are served on port `8090`, on a listener of its own; `8080` keeps
+serving traffic and `GET /health`. **Keep `8090` inside the network**, since the
+exposition names every paid endpoint, how often payments are refused and why, and how
+much has been charged. Scrape `localhost:8090/metrics` for the full set: every series is
+prefixed `bx402_`, and one with nothing recorded yet is absent rather than zero.
