@@ -23,6 +23,7 @@
 //! One screener backs every chain this way. Adapted from the Go reference
 //! (`brave-intl/compliance-ops`).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -35,6 +36,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::Config;
 use crate::error::service_unavailable;
+use crate::metrics::{Metrics, screening};
 
 /// Canary key used to probe the bucket at startup.
 const CANARY_KEY: &str = "bx402.canary";
@@ -49,6 +51,7 @@ const SCREEN_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct RestrictedAddressScreener {
     client: aws_sdk_s3::Client,
     bucket: String,
+    metrics: Arc<Metrics>,
 }
 
 /// The two definite answers a screen can give.
@@ -73,8 +76,12 @@ enum Screening {
 struct ScreenError(#[source] Box<dyn std::error::Error + Send + Sync>);
 
 impl RestrictedAddressScreener {
-    pub(crate) fn new(client: aws_sdk_s3::Client, bucket: String) -> Self {
-        Self { client, bucket }
+    pub(crate) fn new(client: aws_sdk_s3::Client, bucket: String, metrics: Arc<Metrics>) -> Self {
+        Self {
+            client,
+            bucket,
+            metrics,
+        }
     }
 
     /// Screen one identifier, exactly as given, within [`SCREEN_TIMEOUT`].
@@ -108,12 +115,20 @@ impl RestrictedAddressScreener {
         rejected: Response,
     ) -> Result<(), Response> {
         let Some(identifier) = identifier else {
+            self.metrics.record_screening(screening::UNIDENTIFIED);
             return Err(rejected);
         };
         match self.screen(&identifier).await {
-            Ok(Screening::Allowed) => Ok(()),
-            Ok(Screening::Blocked) => Err(rejected),
+            Ok(Screening::Allowed) => {
+                self.metrics.record_screening(screening::ALLOWED);
+                Ok(())
+            }
+            Ok(Screening::Blocked) => {
+                self.metrics.record_screening(screening::BLOCKED);
+                Err(rejected)
+            }
             Err(err) => {
+                self.metrics.record_screening(screening::ERROR);
                 tracing::error!(error = ?err, "address screening failed");
                 Err(service_unavailable())
             }
@@ -169,7 +184,10 @@ impl std::fmt::Display for Status {
 /// - bucket set: builds the AWS client and probes the bucket once. A reachable bucket
 ///   returns `(Some, Enabled)`; any probe failure is an error that aborts startup, so a
 ///   misconfigured screener never serves traffic.
-pub async fn init(config: &Config) -> anyhow::Result<(Option<RestrictedAddressScreener>, Status)> {
+pub async fn init(
+    config: &Config,
+    metrics: Arc<Metrics>,
+) -> anyhow::Result<(Option<RestrictedAddressScreener>, Status)> {
     let Some(bucket) = config.restricted_address_s3_bucket.clone() else {
         return Ok((None, Status::Disabled));
     };
@@ -183,7 +201,7 @@ pub async fn init(config: &Config) -> anyhow::Result<(Option<RestrictedAddressSc
         )
         .load()
         .await;
-    let (screener, status) = init_with(aws_sdk_s3::Client::new(&aws), bucket).await?;
+    let (screener, status) = init_with(aws_sdk_s3::Client::new(&aws), bucket, metrics).await?;
     Ok((Some(screener), status))
 }
 
@@ -192,8 +210,9 @@ pub async fn init(config: &Config) -> anyhow::Result<(Option<RestrictedAddressSc
 async fn init_with(
     client: aws_sdk_s3::Client,
     bucket: String,
+    metrics: Arc<Metrics>,
 ) -> anyhow::Result<(RestrictedAddressScreener, Status)> {
-    let screener = RestrictedAddressScreener::new(client, bucket.clone());
+    let screener = RestrictedAddressScreener::new(client, bucket.clone(), metrics);
     // A reachable bucket (404, or even a 200) proves credentials and permissions work.
     // On failure, `?` carries the real cause (bad creds, IAM 403, timeout) up the chain.
     screener
@@ -234,10 +253,20 @@ fn test_client(endpoint: String) -> aws_sdk_s3::Client {
 #[cfg(test)]
 pub(crate) const TEST_BUCKET: &str = "restricted-address-bucket";
 
-/// Build a screener pointed at a wiremock S3, for tests in other modules of the crate.
+/// Build a screener pointed at a wiremock S3, for tests in other modules of the
+/// crate. Records into a registry of its own, which those tests do not read.
 #[cfg(test)]
 pub(crate) fn test_screener(endpoint: String) -> RestrictedAddressScreener {
-    RestrictedAddressScreener::new(test_client(endpoint), TEST_BUCKET.to_string())
+    test_screener_recording(endpoint, Arc::new(Metrics::new()))
+}
+
+/// [`test_screener`] recording into a registry the caller can read back.
+#[cfg(test)]
+pub(crate) fn test_screener_recording(
+    endpoint: String,
+    metrics: Arc<Metrics>,
+) -> RestrictedAddressScreener {
+    RestrictedAddressScreener::new(test_client(endpoint), TEST_BUCKET.to_string(), metrics)
 }
 
 /// A screener against a mock S3 that answers every `HEAD` with `status`, for
@@ -247,6 +276,15 @@ pub(crate) fn test_screener(endpoint: String) -> RestrictedAddressScreener {
 pub(crate) async fn test_screener_answering(
     status: u16,
 ) -> (wiremock::MockServer, RestrictedAddressScreener) {
+    test_screener_answering_recording(status, Arc::new(Metrics::new())).await
+}
+
+/// [`test_screener_answering`] recording into a registry the caller can read back.
+#[cfg(test)]
+pub(crate) async fn test_screener_answering_recording(
+    status: u16,
+    metrics: Arc<Metrics>,
+) -> (wiremock::MockServer, RestrictedAddressScreener) {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -255,13 +293,14 @@ pub(crate) async fn test_screener_answering(
         .respond_with(ResponseTemplate::new(status))
         .mount(&server)
         .await;
-    let screener = test_screener(server.uri());
+    let screener = test_screener_recording(server.uri(), metrics);
     (server, screener)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::assert_recorded;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use wiremock::matchers::method;
@@ -298,6 +337,39 @@ mod tests {
                 "s3 status: {s3_status}"
             );
         }
+    }
+
+    /// The three refusals are one indistinguishable `Err` to the rails, and one
+    /// generic response to the client. The metric is the only thing that tells
+    /// a listed payer apart from a screener we could not reach.
+    #[tokio::test]
+    async fn every_screen_records_what_it_decided() {
+        // The same S3 statuses as the refusal test above, plus the payment that
+        // carried nothing to screen.
+        let cases = [(404, "allowed"), (200, "blocked"), (500, "error")];
+        for (s3_status, expected) in cases {
+            let metrics = Arc::new(Metrics::new());
+            let (_server, screener) =
+                test_screener_answering_recording(s3_status, metrics.clone()).await;
+
+            let _ = screener
+                .require_allowed(Some("0xanything".to_string()), rejected())
+                .await;
+
+            assert_recorded(
+                &metrics,
+                &format!(r#"bx402_screenings_total{{outcome="{expected}"}} 1"#),
+            );
+        }
+
+        // Nothing to screen is counted apart from a screen that ran.
+        let metrics = Arc::new(Metrics::new());
+        let screener = test_screener_recording("http://127.0.0.1:1".to_string(), metrics.clone());
+        let _ = screener.require_allowed(None, rejected()).await;
+        assert_recorded(
+            &metrics,
+            r#"bx402_screenings_total{outcome="unidentified"} 1"#,
+        );
     }
 
     #[tokio::test]
@@ -378,7 +450,7 @@ mod tests {
     #[tokio::test]
     async fn init_disabled_when_bucket_unset() {
         let config = crate::Config::for_tests();
-        let (screener, status) = init(&config).await.unwrap();
+        let (screener, status) = init(&config, Arc::new(Metrics::new())).await.unwrap();
         assert!(screener.is_none());
         assert!(matches!(status, Status::Disabled));
     }
@@ -400,9 +472,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        let (_screener, status) = init_with(test_client(server.uri()), TEST_BUCKET.to_string())
-            .await
-            .unwrap();
+        let (_screener, status) = init_with(
+            test_client(server.uri()),
+            TEST_BUCKET.to_string(),
+            Arc::new(Metrics::new()),
+        )
+        .await
+        .unwrap();
         assert!(matches!(status, Status::Enabled { .. }));
     }
 
@@ -413,7 +489,12 @@ mod tests {
             .respond_with(ResponseTemplate::new(status))
             .mount(&server)
             .await;
-        init_with(test_client(server.uri()), TEST_BUCKET.to_string()).await
+        init_with(
+            test_client(server.uri()),
+            TEST_BUCKET.to_string(),
+            Arc::new(Metrics::new()),
+        )
+        .await
     }
 
     #[tokio::test]

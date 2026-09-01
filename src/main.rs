@@ -38,7 +38,7 @@ async fn run() -> anyhow::Result<()> {
 
     // A configured but unreachable bucket aborts startup, so the service never serves
     // traffic with a broken screener.
-    let (screener, screening) = bx402::init_screener(&config).await?;
+    let (screener, screening) = bx402::init_screener(&config, metrics.clone()).await?;
     tracing::info!("restricted address screening: {screening}");
 
     let app = bx402::app(config, screener, metrics.clone()).await?;

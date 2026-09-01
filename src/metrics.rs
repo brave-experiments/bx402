@@ -84,6 +84,22 @@ pub(crate) mod outcome {
     pub(crate) const UPSTREAM_FAILED: &str = "upstream_failed";
 }
 
+/// What a screen decided.
+///
+/// The three refusals reach the rails as one indistinguishable error, so this is
+/// the only place they stay apart.
+pub(crate) mod screening {
+    /// Not on the restricted list.
+    pub(crate) const ALLOWED: &str = "allowed";
+    /// On the restricted list.
+    pub(crate) const BLOCKED: &str = "blocked";
+    /// The payment carried nothing to screen.
+    pub(crate) const UNIDENTIFIED: &str = "unidentified";
+    /// The screen gave no answer: a timeout, a permissions problem, or any
+    /// other failure to reach the list.
+    pub(crate) const ERROR: &str = "error";
+}
+
 /// The steps of a payment worth timing separately. Which steps a rail reports
 /// depends on whether it can check a payment without moving money.
 pub(crate) mod step {
@@ -115,6 +131,12 @@ struct PaymentLabels {
 struct StepLabels {
     rail: &'static str,
     step: &'static str,
+}
+
+/// One screen, and what it decided.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ScreeningLabels {
+    outcome: &'static str,
 }
 
 /// One endpoint on one rail, for the money it took.
@@ -171,6 +193,7 @@ pub struct Metrics {
     payments: Family<PaymentLabels, Counter>,
     payment_step_duration: Family<StepLabels, Histogram, fn() -> Histogram>,
     charged_base_units: Family<ChargeLabels, Counter>,
+    screenings: Family<ScreeningLabels, Counter>,
 }
 
 impl Metrics {
@@ -245,6 +268,13 @@ impl Metrics {
             charged_base_units.clone(),
         );
 
+        let screenings = Family::default();
+        registry.register(
+            "screenings",
+            "Address screens performed, by what they decided",
+            screenings.clone(),
+        );
+
         Self {
             registry,
             requests,
@@ -255,7 +285,15 @@ impl Metrics {
             payments,
             payment_step_duration,
             charged_base_units,
+            screenings,
         }
+    }
+
+    /// Record what one address screen decided.
+    pub(crate) fn record_screening(&self, outcome: &'static str) {
+        self.screenings
+            .get_or_create(&ScreeningLabels { outcome })
+            .inc();
     }
 
     /// Record one challenge the service issued instead of serving the request.
