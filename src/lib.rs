@@ -744,7 +744,7 @@ mod tests {
         let (response, metrics) = paid_x402(true, true, 200).await;
         assert_eq!(response.status(), StatusCode::OK);
 
-        assert_payment_outcome(&metrics, "settled");
+        assert_payment_outcome(&metrics, "x402", "settled");
         // The catalog price, not anything the payer stated.
         assert_recorded(
             &metrics,
@@ -766,18 +766,18 @@ mod tests {
     async fn each_way_a_payment_fails_records_its_own_outcome() {
         let (response, metrics) = paid_x402(false, true, 200).await;
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
-        assert_payment_outcome(&metrics, "refused");
+        assert_payment_outcome(&metrics, "x402", "refused");
 
         // Verified, then the search failed: relayed as is, and never charged.
         let (response, metrics) = paid_x402(true, true, 500).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_payment_outcome(&metrics, "upstream_failed");
+        assert_payment_outcome(&metrics, "x402", "upstream_failed");
         assert_not_recorded(&metrics, r#"bx402_charged_base_units_total{"#);
 
         // Verified, then settlement declined.
         let (response, metrics) = paid_x402(true, false, 200).await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        assert_payment_outcome(&metrics, "settle_failed");
+        assert_payment_outcome(&metrics, "x402", "settle_failed");
     }
 
     #[tokio::test]
@@ -791,16 +791,16 @@ mod tests {
 
         let response = app.oneshot(paid_request_from(from)).await.unwrap();
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
-        assert_payment_outcome(&metrics, "screened_out");
+        assert_payment_outcome(&metrics, "x402", "screened_out");
     }
 
-    /// Assert exactly one x402 payment for the web search endpoint ended in
+    /// Assert exactly one payment on `rail` for the web search endpoint ended in
     /// `outcome`.
-    fn assert_payment_outcome(metrics: &Metrics, outcome: &str) {
+    fn assert_payment_outcome(metrics: &Metrics, rail: &str, outcome: &str) {
         assert_recorded(
             metrics,
             &format!(
-                r#"bx402_payments_total{{rail="x402",endpoint="/res/v1/web/search",outcome="{outcome}"}} 1"#
+                r#"bx402_payments_total{{rail="{rail}",endpoint="/res/v1/web/search",outcome="{outcome}"}} 1"#
             ),
         );
     }
@@ -862,17 +862,27 @@ mod tests {
         screener: Option<RestrictedAddressScreener>,
         authorization: &str,
     ) -> axum::response::Response {
+        let (response, _metrics) = get_mpp_and_metrics(config, screener, authorization).await;
+        response
+    }
+
+    /// [`get_mpp`], handing back the registry the request recorded into.
+    async fn get_mpp_and_metrics(
+        config: Config,
+        screener: Option<RestrictedAddressScreener>,
+        authorization: &str,
+    ) -> (axum::response::Response, Arc<Metrics>) {
         // The mock RPC is bound here, not inside a helper, so it stays alive for
         // the request. Dropping it early frees its port for another test's mock
         // to bind, and a verify meant to find nothing there reaches that instead.
         let rpc = crate::mpp::test_rpc().await;
-        let (app, _metrics) = app_and_metrics(&rpc, config, screener).await;
+        let (app, metrics) = app_and_metrics(&rpc, config, screener).await;
         let request = Request::builder()
             .uri(format!("{WEB_SEARCH_PATH}?q=rust"))
             .header("authorization", authorization)
             .body(Body::empty())
             .unwrap();
-        app.oneshot(request).await.unwrap()
+        (app.oneshot(request).await.unwrap(), metrics)
     }
 
     /// An upstream that must never be called, for tests asserting a payment is
@@ -940,6 +950,57 @@ mod tests {
         let response = get_mpp(config, Some(screener), &credential).await;
 
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    }
+
+    /// The MPP rail refuses in several ways that look identical to the client,
+    /// so each keeps its own outcome.
+    #[tokio::test]
+    async fn mpp_refusals_record_their_own_outcomes() {
+        // A credential we cannot read at all.
+        let (config, _upstream) = refusing_mpp_config().await;
+        let (response, metrics) =
+            get_mpp_and_metrics(config, None, "Payment not-a-credential").await;
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_payment_outcome(&metrics, "mpp", "malformed");
+
+        // Readable, and a kind of credential this rail does not take: the client
+        // says it broadcast the transfer itself, before we could screen it.
+        let (config, _upstream) = refusing_mpp_config().await;
+        let credential = crate::mpp::hash_credential_header(&config).await;
+        let (response, metrics) = get_mpp_and_metrics(config, None, &credential).await;
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_payment_outcome(&metrics, "mpp", "unsupported");
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_tempo_rpc_records_the_charge_it_attempted() {
+        let (config, _upstream) = refusing_mpp_config().await;
+        let (credential, _signer) = crate::mpp::signed_transaction_credential_header(&config).await;
+        let (response, metrics) = get_mpp_and_metrics(config, None, &credential).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_payment_outcome(&metrics, "mpp", "network_unavailable");
+
+        // The charge is timed even when it fails, so a slow chain and an
+        // unreachable one are both visible.
+        assert_recorded(
+            &metrics,
+            r#"bx402_payment_step_duration_seconds_count{rail="mpp",step="charge"} 1"#,
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blocked_mpp_signer_records_a_screened_out_payment() {
+        let (config, _upstream) = refusing_mpp_config().await;
+        let (credential, signer) = crate::mpp::signed_transaction_credential_header(&config).await;
+        let (_s3, screener) = screener_blocking(&signer).await;
+
+        let (response, metrics) = get_mpp_and_metrics(config, Some(screener), &credential).await;
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_payment_outcome(&metrics, "mpp", "screened_out");
+        // Refused before the charge, so nothing was attempted on chain.
+        assert_not_recorded(&metrics, r#"step="charge""#);
     }
 
     #[tokio::test]

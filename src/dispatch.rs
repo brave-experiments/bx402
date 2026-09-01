@@ -140,7 +140,7 @@ pub(crate) async fn dispatch(State(ctx): State<Context>, req: Request, next: Nex
         }
         Rail::Mpp => {
             if let Some(client) = ctx.mpp {
-                return mpp::handle(client, ctx.screener, req, next).await;
+                return mpp::handle(client, ctx.screener, metrics, endpoint, req, next).await;
             }
             challenge::RAIL_DISABLED
         }

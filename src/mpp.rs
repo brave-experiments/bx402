@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::Request,
@@ -30,6 +30,7 @@ use tempo_primitives::transaction::AASigned;
 
 use crate::endpoints;
 use crate::error::json_error;
+use crate::metrics::{Metrics, outcome, step};
 use crate::screener::RestrictedAddressScreener;
 use crate::{AppError, config::MppConfig};
 
@@ -45,6 +46,9 @@ const REALM: &str = "bx402";
 
 /// The EVM treasury address that receives MPP payments (the challenge recipient).
 const PAY_TO_EVM: &str = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
+
+/// What this rail calls itself in metrics.
+const RAIL: &str = "mpp";
 
 /// How long to wait for the startup chain-id query before giving up.
 const CHAIN_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -205,15 +209,23 @@ async fn get_chain_id(rpc_url: &str) -> Result<u64, AppError> {
 pub(crate) async fn handle(
     client: Client,
     screener: Option<RestrictedAddressScreener>,
+    metrics: Arc<Metrics>,
+    endpoint: &'static str,
     req: Request,
     next: Next,
 ) -> Response {
+    // Every exit below records how the payment ended, so no path goes uncounted.
+    let ended = |outcome, response| {
+        metrics.record_payment(RAIL, endpoint, outcome);
+        response
+    };
+
     let Some(credential) = credential(req.headers()) else {
-        return payment_rejected();
+        return ended(outcome::MALFORMED, payment_rejected());
     };
 
     let Some(payload) = transaction_payload(&credential) else {
-        return payment_rejected();
+        return ended(outcome::UNSUPPORTED, payment_rejected());
     };
 
     // Screen the transfer's signer before verification, so a blocked payer's
@@ -224,28 +236,40 @@ pub(crate) async fn handle(
             .require_allowed(signer_address(&payload), payment_rejected())
             .await
     {
-        return denied;
+        return ended(outcome::SCREENED_OUT, denied);
     }
 
     // Verify against the charge for the path being called, so a credential minted
     // for a cheaper endpoint does not pay for this one.
-    let Some(charge) = client.charges.get(req.uri().path()) else {
-        return payment_rejected();
+    let Some(charge) = client.charges.get(endpoint) else {
+        return ended(outcome::NO_OFFER, payment_rejected());
     };
     // A Tempo RPC we cannot reach is our failure, not the client's, so it is a 502
     // rather than a 402.
-    let receipt = match client
+    let started = Instant::now();
+    let charged = client
         .handler
         .verify_credential_with_expected_request(&credential, charge)
-        .await
-    {
+        .await;
+    metrics.record_payment_step(RAIL, step::CHARGE, started.elapsed());
+    let receipt = match charged {
         Ok(receipt) => receipt,
         Err(err) if err.code == Some(ErrorCode::NetworkError) => {
             tracing::error!(error = ?err, "mpp verify failed: tempo rpc unreachable");
-            return gateway_error();
+            return ended(outcome::NETWORK_UNAVAILABLE, gateway_error());
         }
-        Err(_) => return payment_rejected(),
+        Err(_) => return ended(outcome::REFUSED, payment_rejected()),
     };
+
+    // Recorded here rather than after the search, because the money has already
+    // moved. A search that then fails does not undo the charge, so this rail has
+    // no outcome for it the way the x402 rail does.
+    metrics.record_payment(RAIL, endpoint, outcome::SETTLED);
+    // The price comes from the catalog, so what we count as earned is what we
+    // advertised rather than anything the payer said.
+    if let Some(sold) = endpoints::find(endpoint) {
+        metrics.record_charge(RAIL, endpoint, sold.price_base_units);
+    }
 
     // The payment has already settled, so the receipt rides on whatever the search
     // returns: the client paid and gets their proof either way.

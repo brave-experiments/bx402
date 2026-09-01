@@ -70,6 +70,8 @@ pub(crate) mod outcome {
     pub(crate) const MALFORMED: &str = "malformed";
     /// The proof was readable but accepted no offer we made for this path.
     pub(crate) const NO_OFFER: &str = "no_offer";
+    /// The proof was readable and is a kind this rail does not take.
+    pub(crate) const UNSUPPORTED: &str = "unsupported";
     /// The payment was read and understood, and did not verify.
     pub(crate) const REFUSED: &str = "refused";
     /// The payer did not clear address screening.
@@ -89,6 +91,8 @@ pub(crate) mod step {
     pub(crate) const VERIFY: &str = "verify";
     /// Moving the money.
     pub(crate) const SETTLE: &str = "settle";
+    /// Checking and moving in one call, where the rail offers no dry run.
+    pub(crate) const CHARGE: &str = "charge";
 }
 
 /// One challenge the service issued.
