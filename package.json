@@ -1,0 +1,30 @@
+{
+  "name": "bx402",
+  "version": "0.1.0",
+  "description": "Micropayment proxy for the Brave Search API over x402 and MPP",
+  "license": "MPL-2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@11.21.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node ts/dist/main.js",
+    "lint": "biome ci .",
+    "format": "biome format --write .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "hono": "^4.13.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.12",
+    "@types/node": "^26.4.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
+  }
+}
