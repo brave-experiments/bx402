@@ -1,5 +1,6 @@
 import { serve } from "@hono/node-server";
 import { app, banner } from "./app.js";
+import { configFromEnv } from "./config.js";
 import { initLogging, log } from "./log.js";
 
 /** Port serving public traffic. */
@@ -22,7 +23,20 @@ async function run(): Promise<void> {
 
   log.info(banner());
 
-  const server = serve({ fetch: app().fetch, hostname: "0.0.0.0", port: PORT }, (address) => {
+  const config = configFromEnv();
+  log.info(`brave search api: ${config.braveSearchApiBaseUrl}`);
+  log.info(
+    config.x402 === undefined
+      ? "x402 rail: disabled by ENABLED_RAILS"
+      : `x402 facilitator: ${config.x402.facilitatorUrl}`,
+  );
+  log.info(
+    config.mpp === undefined
+      ? "mpp rail: disabled by ENABLED_RAILS"
+      : `mpp tempo rpc: ${config.mpp.rpcUrl}`,
+  );
+
+  const server = serve({ fetch: app(config).fetch, hostname: "0.0.0.0", port: PORT }, (address) => {
     log.info(`listening on ${address.address}:${address.port}`);
   });
 
