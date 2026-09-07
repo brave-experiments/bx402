@@ -1,9 +1,11 @@
 import { Hono } from "hono";
 import type { Dispatcher } from "undici";
 import type { Config } from "./config.js";
+import { context, dispatch } from "./dispatch.js";
 import { ENDPOINTS } from "./endpoints.js";
 import { AppError } from "./error.js";
 import { endpointLabel, type Metrics, measure } from "./metrics.js";
+import type { RestrictedAddressScreener } from "./screener.js";
 import { search, searchClient } from "./search.js";
 import { VERSION } from "./version.js";
 
@@ -27,9 +29,18 @@ export function banner(): string {
  * Returns the app rather than serving it, so tests drive the same routes as the
  * binary without binding a socket. The upstream connection pool is passed in so
  * a test can hand over a mock dispatcher instead of reaching the network.
+ *
+ * Throws when a rail cannot be built from the configuration, so a deployment
+ * with an unusable facilitator URL never serves traffic.
  */
-export function app(config: Config, metrics: Metrics, client: Dispatcher = searchClient()): Hono {
+export function app(
+  config: Config,
+  screener: RestrictedAddressScreener | undefined,
+  metrics: Metrics,
+  client: Dispatcher = searchClient(),
+): Hono {
   const hono = new Hono();
+  const ctx = context(config, screener, metrics);
 
   // Outermost, so the timing covers everything the service does and the count
   // includes requests that match no route.
@@ -39,7 +50,12 @@ export function app(config: Config, metrics: Metrics, client: Dispatcher = searc
   hono.on(ALLOWED_METHODS, HEALTH_PATH, (c) => c.body(null, 200));
 
   for (const endpoint of ENDPOINTS) {
-    hono.on(ALLOWED_METHODS, endpoint.path, (c) => proxy(c.req.raw, config, metrics, client));
+    // The dispatch gate runs only for the methods the route serves, so an
+    // unsupported method gets the plain 405 rather than a payable 402 whose
+    // search would then be refused.
+    hono.on(ALLOWED_METHODS, endpoint.path, dispatch(ctx), (c) =>
+      proxy(c.req.raw, config, metrics, client),
+    );
   }
 
   // Registered after the served methods, so it answers only a method those did

@@ -43,11 +43,11 @@ async function run(): Promise<void> {
 
   // A configured but unreachable bucket aborts startup, so the service never
   // serves traffic with a broken screener.
-  const { status } = await initScreener(config, metrics);
+  const { screener, status } = await initScreener(config, metrics);
   log.info(`restricted address screening: ${statusLine(status)}`);
 
   const server = serve(
-    { fetch: app(config, metrics).fetch, hostname: "0.0.0.0", port: PORT },
+    { fetch: app(config, screener, metrics).fetch, hostname: "0.0.0.0", port: PORT },
     (address) => {
       log.info(`listening on ${address.address}:${address.port}`);
     },
