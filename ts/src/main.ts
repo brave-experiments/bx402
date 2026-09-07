@@ -3,6 +3,7 @@ import { app, banner } from "./app.js";
 import { configFromEnv } from "./config.js";
 import { initLogging, log } from "./log.js";
 import { Metrics, serveMetrics } from "./metrics.js";
+import { initScreener, statusLine } from "./screener.js";
 
 /** Port serving public traffic. */
 const PORT = 8080;
@@ -39,6 +40,11 @@ async function run(): Promise<void> {
       ? "mpp rail: disabled by ENABLED_RAILS"
       : `mpp tempo rpc: ${config.mpp.rpcUrl}`,
   );
+
+  // A configured but unreachable bucket aborts startup, so the service never
+  // serves traffic with a broken screener.
+  const { status } = await initScreener(config, metrics);
+  log.info(`restricted address screening: ${statusLine(status)}`);
 
   const server = serve(
     { fetch: app(config, metrics).fetch, hostname: "0.0.0.0", port: PORT },
