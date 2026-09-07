@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { app, banner } from "./app.js";
 import { configFromEnv } from "./config.js";
 import { initLogging, log } from "./log.js";
+import { Metrics, serveMetrics } from "./metrics.js";
 
 /** Port serving public traffic. */
 const PORT = 8080;
@@ -23,6 +24,9 @@ async function run(): Promise<void> {
 
   log.info(banner());
 
+  // Built before anything that records into it.
+  const metrics = new Metrics();
+
   const config = configFromEnv();
   log.info(`brave search api: ${config.braveSearchApiBaseUrl}`);
   log.info(
@@ -36,16 +40,24 @@ async function run(): Promise<void> {
       : `mpp tempo rpc: ${config.mpp.rpcUrl}`,
   );
 
-  const server = serve({ fetch: app(config).fetch, hostname: "0.0.0.0", port: PORT }, (address) => {
-    log.info(`listening on ${address.address}:${address.port}`);
-  });
+  const server = serve(
+    { fetch: app(config, metrics).fetch, hostname: "0.0.0.0", port: PORT },
+    (address) => {
+      log.info(`listening on ${address.address}:${address.port}`);
+    },
+  );
 
-  // Serve until the process is stopped. A listener failure, a port already in
-  // use above all, leaves through this promise to the single exit site below
-  // instead of crashing on an unhandled error event.
-  await new Promise<never>((_resolve, reject) => {
-    server.on("error", reject);
-  });
+  // Traffic and metrics are served on separate listeners, so the public port
+  // never exposes the metrics. Serve until the process is stopped; a failure on
+  // either listener, a port already in use above all, leaves through this
+  // promise to the single exit site below instead of crashing on an unhandled
+  // error event.
+  await Promise.race([
+    new Promise<never>((_resolve, reject) => {
+      server.on("error", reject);
+    }),
+    serveMetrics(metrics),
+  ]);
 }
 
 run().catch((err: unknown) => {

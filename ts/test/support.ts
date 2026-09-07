@@ -1,4 +1,6 @@
+import { expect } from "vitest";
 import type { Config } from "../src/config.js";
+import type { Metrics } from "../src/metrics.js";
 
 /**
  * A config whose every endpoint is parseable but unreachable, shared by the test
@@ -14,4 +16,20 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     allowTestnet: true,
     ...overrides,
   };
+}
+
+/**
+ * Assert `series` appears verbatim in what `metrics` has recorded. Shared by the
+ * tests in every file that records, so each assertion names only the series it
+ * cares about.
+ */
+export async function assertRecorded(metrics: Metrics, series: string): Promise<void> {
+  const exposition = await metrics.render();
+  expect(exposition, `missing \`${series}\` in:\n${exposition}`).toContain(series);
+}
+
+/** The inverse of `assertRecorded`, for proving something was never recorded. */
+export async function assertNotRecorded(metrics: Metrics, fragment: string): Promise<void> {
+  const exposition = await metrics.render();
+  expect(exposition, `unexpected \`${fragment}\` in:\n${exposition}`).not.toContain(fragment);
 }

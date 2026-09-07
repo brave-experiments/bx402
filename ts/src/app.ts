@@ -1,19 +1,11 @@
-import { createRequire } from "node:module";
 import { Hono } from "hono";
 import type { Dispatcher } from "undici";
 import type { Config } from "./config.js";
 import { ENDPOINTS } from "./endpoints.js";
 import { AppError } from "./error.js";
+import { endpointLabel, type Metrics, measure } from "./metrics.js";
 import { search, searchClient } from "./search.js";
-
-/**
- * Package metadata, read from the manifest so the version has one source of
- * truth. The manifest sits two levels up from `ts/src` and from the compiled
- * `ts/dist` alike, so the same path works in both.
- */
-const manifest = createRequire(import.meta.url)("../../package.json") as {
-  version: string;
-};
+import { VERSION } from "./version.js";
 
 /**
  * Liveness probe path, kept in one place so the route and its metric label
@@ -26,7 +18,7 @@ const ALLOWED_METHODS = ["GET", "HEAD"];
 
 /** Human-readable service banner, printed on startup. */
 export function banner(): string {
-  return `bx402 v${manifest.version}`;
+  return `bx402 v${VERSION}`;
 }
 
 /**
@@ -36,14 +28,18 @@ export function banner(): string {
  * binary without binding a socket. The upstream connection pool is passed in so
  * a test can hand over a mock dispatcher instead of reaching the network.
  */
-export function app(config: Config, client: Dispatcher = searchClient()): Hono {
+export function app(config: Config, metrics: Metrics, client: Dispatcher = searchClient()): Hono {
   const hono = new Hono();
+
+  // Outermost, so the timing covers everything the service does and the count
+  // includes requests that match no route.
+  hono.use(measure(metrics));
 
   // Liveness probe: 200 with an empty body while the server is up.
   hono.on(ALLOWED_METHODS, HEALTH_PATH, (c) => c.body(null, 200));
 
   for (const endpoint of ENDPOINTS) {
-    hono.on(ALLOWED_METHODS, endpoint.path, (c) => proxy(c.req.raw, config, client));
+    hono.on(ALLOWED_METHODS, endpoint.path, (c) => proxy(c.req.raw, config, metrics, client));
   }
 
   // Registered after the served methods, so it answers only a method those did
@@ -67,10 +63,19 @@ export function app(config: Config, client: Dispatcher = searchClient()): Hono {
  * and never reaches this handler. That is what keeps the proxy closed: a caller
  * cannot name an arbitrary upstream path.
  */
-async function proxy(request: Request, config: Config, client: Dispatcher): Promise<Response> {
+async function proxy(
+  request: Request,
+  config: Config,
+  metrics: Metrics,
+  client: Dispatcher,
+): Promise<Response> {
   const url = new URL(request.url);
+  // Time the whole exchange, body included, since the body is most of it.
+  const endpoint = endpointLabel(url.pathname);
+  const started = performance.now();
   try {
     const upstream = await search(client, config, url.pathname, rawQuery(request.url));
+    metrics.recordUpstream(endpoint, String(upstream.status), seconds(started));
     const headers = new Headers();
     if (upstream.contentType !== undefined) {
       headers.set("content-type", upstream.contentType);
@@ -83,11 +88,18 @@ async function proxy(request: Request, config: Config, client: Dispatcher): Prom
         : new Uint8Array(upstream.body);
     return new Response(body, { status: upstream.status, headers });
   } catch (err: unknown) {
-    if (err instanceof AppError) {
+    if (err instanceof AppError && err.failure !== undefined) {
+      // No response arrived, so the failure stands in for a status.
+      metrics.recordUpstream(endpoint, err.failure, seconds(started));
       return err.toResponse();
     }
     throw err;
   }
+}
+
+/** Elapsed seconds since `started`, the unit every duration metric records. */
+function seconds(started: number): number {
+  return (performance.now() - started) / 1000;
 }
 
 /**
