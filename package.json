@@ -18,14 +18,17 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1127.0",
     "@hono/node-server": "^2.1.1",
     "@prometheus-io/client": "^0.16.1",
+    "@smithy/node-http-handler": "^4.12.1",
     "hono": "^4.13.7",
     "undici": "^8.10.2"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",
     "@types/node": "^26.4.1",
+    "aws-sdk-client-mock": "^4.1.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0"
   }
