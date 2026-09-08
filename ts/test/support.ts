@@ -1,6 +1,7 @@
 import { HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { type AwsStub, mockClient } from "aws-sdk-client-mock";
 import type { Hono } from "hono";
+import { Challenge, Credential } from "mppx";
 import * as Secp256k1 from "ox/Secp256k1";
 import { TxEnvelopeTempo } from "ox/tempo";
 import { type Dispatcher, getGlobalDispatcher, MockAgent, setGlobalDispatcher } from "undici";
@@ -9,6 +10,7 @@ import { expect } from "vitest";
 import { app } from "../src/app.js";
 import type { Config } from "../src/config.js";
 import { Metrics } from "../src/metrics.js";
+import { challenge as mppChallenge, client as mppClient } from "../src/mpp.js";
 import { RestrictedAddressScreener } from "../src/screener.js";
 import { accepts } from "../src/x402.js";
 
@@ -211,6 +213,51 @@ export function forgedTransaction(): { transaction: string; signer: string } {
   return {
     transaction: TxEnvelopeTempo.serialize(envelope, { signature }),
     signer: TEST_SIGNER,
+  };
+}
+
+/** The paid path every MPP credential in the tests answers a challenge for. */
+export const WEB_SEARCH_PATH = "/res/v1/web/search";
+
+/**
+ * The `Authorization` value for a credential answering a real challenge for the
+ * web search endpoint, carrying `payload` as its payment proof.
+ *
+ * The challenge is minted by a second client rather than hand-written, so its id
+ * is a genuine HMAC under the test secret and the app's own client accepts it.
+ */
+export async function credentialHeader(payload: unknown): Promise<string> {
+  const config = testConfig();
+  if (config.mpp === undefined) {
+    throw new Error("the test config enables the MPP rail");
+  }
+  mockTempoRpc(TEST_CHAIN_ID);
+  const built = await mppClient(config.mpp, config.allowTestnet);
+  const advertised = await mppChallenge(built, WEB_SEARCH_PATH);
+  if (advertised === undefined) {
+    throw new Error("the challenge builds");
+  }
+  const minted = Challenge.deserialize(advertised[1]);
+  return Credential.serialize(Credential.from({ challenge: minted, payload }));
+}
+
+/** A credential whose payload says the client already broadcast the transfer. */
+export function hashCredentialHeader(): Promise<string> {
+  return credentialHeader({ type: "hash", hash: "0xdeadbeef" });
+}
+
+/**
+ * A credential carrying a real signed transaction, and the address that signed
+ * it, so a test can put that exact address on the restricted list.
+ */
+export async function signedTransactionCredentialHeader(): Promise<{
+  header: string;
+  signer: string;
+}> {
+  const { transaction, signer } = forgedTransaction();
+  return {
+    header: await credentialHeader({ type: "transaction", signature: transaction }),
+    signer,
   };
 }
 

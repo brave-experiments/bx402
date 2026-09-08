@@ -157,6 +157,21 @@ export function dispatch(ctx: Context): MiddlewareHandler {
       );
       return;
     }
+    if (rail === "mpp" && ctx.mpp !== undefined) {
+      // Assigned rather than returned, for the same reason as above.
+      c.res = await mpp.handle(
+        ctx.mpp,
+        ctx.screener,
+        ctx.metrics,
+        endpoint,
+        c.req.raw.headers,
+        async () => {
+          await next();
+          return c.res;
+        },
+      );
+      return;
+    }
     // Nothing here can pay: no proof, or proof on a rail the deployment disables.
     const reason = rail === "none" ? challenge.NO_PAYMENT : challenge.RAIL_DISABLED;
     ctx.metrics.recordChallenge(endpoint, reason);

@@ -6,19 +6,20 @@
  * classifies each request and delegates to whichever rail it is paying on.
  */
 
-import { Challenge, Credential } from "mppx";
+import { Challenge, Credential, Receipt } from "mppx";
 import { Mppx, tempo } from "mppx/server";
 import * as Secp256k1 from "ox/Secp256k1";
 import { TxEnvelopeTempo } from "ox/tempo";
 import { request } from "undici";
-import type { Chain } from "viem";
-import { formatUnits } from "viem";
+import { type Chain, formatUnits, HttpRequestError, SocketClosedError, TimeoutError } from "viem";
 import { createClient, http } from "viem/tempo";
 import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 import type { MppConfig } from "./config.js";
-import { ENDPOINTS } from "./endpoints.js";
-import { AppError } from "./error.js";
+import { ENDPOINTS, find } from "./endpoints.js";
+import { AppError, jsonError } from "./error.js";
 import { log } from "./log.js";
+import { type Metrics, outcome, step } from "./metrics.js";
+import type { RestrictedAddressScreener } from "./screener.js";
 
 /**
  * MPP carries its credential in the `Authorization` request header. Dispatch
@@ -33,8 +34,24 @@ const CREDENTIAL_HEADER = "authorization";
  */
 const CHALLENGE_HEADER = "www-authenticate";
 
+/**
+ * MPP returns its settlement receipt in the `Payment-Receipt` response header as
+ * base64url JSON, with no scheme prefix of its own.
+ */
+const PAYMENT_RECEIPT_HEADER = "payment-receipt";
+
 /** What this rail calls itself in metrics. */
 export const RAIL = "mpp";
+
+/**
+ * Shared message for every refused payment, so a missing, malformed,
+ * non-transaction, and rejected credential all read alike to a client. Which one
+ * it was survives only in the metrics.
+ */
+const GENERIC_REJECTION = "mpp payment did not verify";
+
+/** Shared message for a charge we could not put to the network at all. */
+const NETWORK_UNAVAILABLE = "payment network unavailable";
 
 /**
  * The realm every challenge carries and every credential echoes back. It names
@@ -328,6 +345,144 @@ export function signerAddress(payload: TransactionPayload): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Drive the MPP pay flow for a request that carries a credential.
+ *
+ * MPP has no dry run: the one call checks the signed transfer and settles it on
+ * Tempo, so the money moves before the search runs. That shapes every rule here:
+ *
+ * - credential missing, unreadable, not a signed transaction, or rejected: `402`
+ *   before anything is broadcast.
+ * - the Tempo endpoint unreachable: `502`, since that is our failure not the
+ *   payer's.
+ * - charged: the search runs and its response carries the receipt whatever its
+ *   status, because the payment has already settled and cannot be taken back.
+ */
+export async function handle(
+  client: Client,
+  screener: RestrictedAddressScreener | undefined,
+  metrics: Metrics,
+  endpoint: string,
+  headers: Headers,
+  runSearch: () => Promise<Response>,
+): Promise<Response> {
+  // Every exit below records how the payment ended, so no path goes uncounted.
+  const ended = (label: string, response: Response): Response => {
+    metrics.recordPayment(RAIL, endpoint, label);
+    return response;
+  };
+
+  const parsed = credential(headers);
+  if (parsed === undefined) {
+    return ended(outcome.MALFORMED, paymentRejected());
+  }
+
+  // A hash credential says the client already broadcast the transfer itself, so
+  // there is nothing here for us to check before it settled.
+  const payload = transactionPayload(parsed);
+  if (payload === undefined) {
+    return ended(outcome.UNSUPPORTED, paymentRejected());
+  }
+
+  // Screen before the charge, so a blocked payer's transaction is never
+  // broadcast and no funds move.
+  if (screener !== undefined) {
+    const denied = await screener.requireAllowed(signerAddress(payload), paymentRejected());
+    if (denied !== undefined) {
+      return ended(outcome.SCREENED_OUT, denied);
+    }
+  }
+
+  const charge = client.charges.get(endpoint);
+  if (charge === undefined) {
+    return ended(outcome.NO_OFFER, paymentRejected());
+  }
+
+  // Checking and moving in one call, so this single step covers both.
+  const started = performance.now();
+  let receipt: Receipt.Receipt;
+  try {
+    // Spread rather than passed straight through, because the SDK takes a plain
+    // record here and an interface carries no index signature.
+    receipt = await client.handler.broadcastCredential(parsed, { request: { ...charge } });
+  } catch (err: unknown) {
+    metrics.recordPaymentStep(RAIL, step.CHARGE, seconds(started));
+    if (endpointUnreachable(err)) {
+      log.error(`mpp charge failed: tempo endpoint unreachable: ${describe(err)}`);
+      return ended(outcome.NETWORK_UNAVAILABLE, gatewayError());
+    }
+    return ended(outcome.REFUSED, paymentRejected());
+  }
+  metrics.recordPaymentStep(RAIL, step.CHARGE, seconds(started));
+
+  metrics.recordPayment(RAIL, endpoint, outcome.SETTLED);
+  // The price comes from the catalog, so what we count as earned is what we
+  // advertised rather than anything the payer said.
+  const sold = find(endpoint);
+  if (sold !== undefined) {
+    metrics.recordCharge(RAIL, endpoint, sold.priceBaseUnits);
+  }
+  return attachReceipt(await runSearch(), receipt);
+}
+
+/**
+ * Whether a failed charge failed because the Tempo endpoint could not be
+ * reached, rather than because the payment was bad.
+ *
+ * The SDK reports both as thrown errors and carries no code that separates them,
+ * so the transport failure is recognized by the viem error underneath. The chain
+ * is walked because the SDK wraps what it catches, and the depth is capped so a
+ * self-referencing cause cannot spin here.
+ */
+function endpointUnreachable(err: unknown): boolean {
+  let cause: unknown = err;
+  for (let depth = 0; cause !== undefined && cause !== null && depth < 8; depth += 1) {
+    if (
+      cause instanceof HttpRequestError ||
+      cause instanceof TimeoutError ||
+      cause instanceof SocketClosedError
+    ) {
+      return true;
+    }
+    cause = (cause as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
+ * Attach the settlement receipt as the `Payment-Receipt` header the client reads
+ * back, leaving the response body untouched.
+ */
+function attachReceipt(response: Response, receipt: Receipt.Receipt): Response {
+  const headers = new Headers(response.headers);
+  try {
+    headers.set(PAYMENT_RECEIPT_HEADER, Receipt.serialize(receipt));
+  } catch {
+    log.error("mpp settlement receipt could not be encoded as a header");
+    return response;
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+/** A `402` telling the client their MPP credential was missing, unusable, or refused. */
+function paymentRejected(): Response {
+  return jsonError(402, GENERIC_REJECTION);
+}
+
+/** A `502` for a charge we could not put to the Tempo network at all. */
+function gatewayError(): Response {
+  return jsonError(502, NETWORK_UNAVAILABLE);
+}
+
+/** Elapsed seconds since `started`, the unit every duration metric records. */
+function seconds(started: number): number {
+  return (performance.now() - started) / 1000;
 }
 
 /** The message of a failure, for one log line. */

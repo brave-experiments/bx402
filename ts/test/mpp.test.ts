@@ -1,8 +1,25 @@
-import { Challenge, type Credential } from "mppx";
+import { Challenge, Credential } from "mppx";
+import { HttpRequestError } from "viem";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Config, MppConfig } from "../src/config.js";
-import { challenge, client, credential, signerAddress, transactionPayload } from "../src/mpp.js";
-import { forgedTransaction, mockTempoRpc, restoreNetwork, testConfig } from "./support.js";
+import { Metrics } from "../src/metrics.js";
+import type { Client } from "../src/mpp.js";
+import {
+  challenge,
+  client,
+  credential,
+  handle,
+  signerAddress,
+  transactionPayload,
+} from "../src/mpp.js";
+import {
+  assertNotRecorded,
+  assertRecorded,
+  forgedTransaction,
+  mockTempoRpc,
+  restoreNetwork,
+  testConfig,
+} from "./support.js";
 
 /** Tempo mainnet and the Moderato testnet, the two chains this rail serves. */
 const MAINNET = 4217;
@@ -172,5 +189,99 @@ describe("mpp", () => {
       expect(credential(headers), `case: ${name}`).toBeUndefined();
     }
     expect(credential(new Headers()), "case: no header").toBeUndefined();
+  });
+
+  /**
+   * A client whose charge always fails with `failure`, so a test can drive the
+   * one call that both checks and settles without a chain behind it.
+   */
+  async function refusingClient(failure: unknown): Promise<Client> {
+    const built = await clientOn(testConfig(), MODERATO);
+    return {
+      ...built,
+      handler: {
+        ...built.handler,
+        broadcastCredential: () => Promise.reject(failure),
+      } as Client["handler"],
+    };
+  }
+
+  /** Headers carrying a credential that parses and pays with a signed transaction. */
+  async function payingHeaders(): Promise<Headers> {
+    const { transaction } = forgedTransaction();
+    const built = await clientOn(testConfig(), MODERATO);
+    const advertised = await challenge(built, WEB_SEARCH_PATH);
+    const minted = Challenge.deserialize(advertised?.[1] as string);
+    return new Headers({
+      authorization: Credential.serialize(
+        Credential.from({
+          challenge: minted,
+          payload: { type: "transaction", signature: transaction },
+        }),
+      ),
+    });
+  }
+
+  it("mpp_unreachable_tempo_rpc_is_a_gateway_error", async () => {
+    // The credential is good; only the endpoint is gone. That is our failure and
+    // not the payer's, so it must not read as "you did not pay".
+    const metrics = new Metrics();
+    const unreachable = new HttpRequestError({ url: "http://tempo.invalid" });
+    const response = await handle(
+      await refusingClient(unreachable),
+      undefined,
+      metrics,
+      WEB_SEARCH_PATH,
+      await payingHeaders(),
+      () => Promise.reject(new Error("the search must never run")),
+    );
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: "payment network unavailable" });
+    await assertRecorded(
+      metrics,
+      `bx402_payments_total{rail="mpp",endpoint="${WEB_SEARCH_PATH}",outcome="network_unavailable"} 1`,
+    );
+  });
+
+  it("an_unreachable_tempo_rpc_records_the_charge_it_attempted", async () => {
+    const metrics = new Metrics();
+    await handle(
+      await refusingClient(new HttpRequestError({ url: "http://tempo.invalid" })),
+      undefined,
+      metrics,
+      WEB_SEARCH_PATH,
+      await payingHeaders(),
+      () => Promise.reject(new Error("the search must never run")),
+    );
+
+    // Timed even when it fails, so a dead endpoint shows up as attempted work
+    // rather than as nothing at all.
+    await assertRecorded(
+      metrics,
+      'bx402_payment_step_duration_seconds_count{rail="mpp",step="charge"} 1',
+    );
+  });
+
+  it("a_refused_charge_is_not_a_gateway_error", async () => {
+    // Anything that is not the endpoint being unreachable is the payer's
+    // problem, and reads as a plain refusal.
+    const metrics = new Metrics();
+    const response = await handle(
+      await refusingClient(new Error("Payment verification failed: amount mismatch")),
+      undefined,
+      metrics,
+      WEB_SEARCH_PATH,
+      await payingHeaders(),
+      () => Promise.reject(new Error("the search must never run")),
+    );
+
+    expect(response.status).toBe(402);
+    expect(await response.json()).toEqual({ error: "mpp payment did not verify" });
+    await assertRecorded(
+      metrics,
+      `bx402_payments_total{rail="mpp",endpoint="${WEB_SEARCH_PATH}",outcome="refused"} 1`,
+    );
+    await assertNotRecorded(metrics, 'outcome="network_unavailable"');
   });
 });

@@ -9,13 +9,16 @@ import {
   assertNotRecorded,
   assertRecorded,
   buildApp,
+  credentialHeader,
   decodeChallenge,
+  hashCredentialHeader,
   mockFacilitator,
   paymentSignature,
   restoreNetwork,
   restoreS3,
   screenerAnswering,
   screenerBlocking,
+  signedTransactionCredentialHeader,
   testConfig,
 } from "./support.js";
 
@@ -556,5 +559,77 @@ describe("app", () => {
 
     expect(response.status).toBe(402);
     await assertPaymentOutcome(metrics, "x402", "screened_out");
+  });
+
+  it("mpp_hash_credential_is_refused_before_any_search", async () => {
+    // A credential answering a real challenge, whose payload says the client
+    // already broadcast the transfer. Nothing is left for us to check.
+    const mock = mockUpstream();
+    const response = await (await buildApp(testConfig(), undefined, new Metrics(), mock)).request(
+      "/res/v1/web/search?q=rust",
+      {
+        headers: { authorization: await hashCredentialHeader() },
+      },
+    );
+
+    expect(response.status).toBe(402);
+    // The rail's own refusal, not the cold 402.
+    expect(await response.json()).toEqual({ error: "mpp payment did not verify" });
+    // No interceptor was declared, so a search would have thrown.
+    mock.assertNoPendingInterceptors();
+  });
+
+  it("mpp_blocked_signer_never_reaches_tempo_or_the_search", async () => {
+    const mock = mockUpstream();
+    const { header, signer } = await signedTransactionCredentialHeader();
+    const metrics = new Metrics();
+    const response = await (
+      await buildApp(testConfig(), screenerBlocking(signer, metrics), metrics, mock)
+    ).request("/res/v1/web/search?q=rust", { headers: { authorization: header } });
+
+    expect(response.status).toBe(402);
+    mock.assertNoPendingInterceptors();
+    await assertPaymentOutcome(metrics, "mpp", "screened_out");
+    // Refused before the charge, so nothing was attempted on chain.
+    await assertNotRecorded(metrics, 'step="charge"');
+  });
+
+  it("mpp_refusals_record_their_own_outcomes", async () => {
+    const malformed = new Metrics();
+    const first = await (
+      await buildApp(testConfig(), undefined, malformed, mockUpstream())
+    ).request("/res/v1/web/search?q=rust", {
+      headers: { authorization: "Payment not-a-credential" },
+    });
+    expect(first.status).toBe(402);
+    await assertPaymentOutcome(malformed, "mpp", "malformed");
+
+    const unsupported = new Metrics();
+    const second = await (
+      await buildApp(testConfig(), undefined, unsupported, mockUpstream())
+    ).request("/res/v1/web/search?q=rust", {
+      headers: { authorization: await hashCredentialHeader() },
+    });
+    expect(second.status).toBe(402);
+    await assertPaymentOutcome(unsupported, "mpp", "unsupported");
+  });
+
+  it("mpp_only_app_cold_402s_an_x402_attempt", async () => {
+    const config = testConfig({ x402: undefined });
+    const hono = await buildApp(config, undefined, new Metrics());
+    const response = await hono.request("/res/v1/web/search?q=rust", paid("/res/v1/web/search"));
+
+    expect(response.status).toBe(402);
+    expect(response.headers.get("www-authenticate")).not.toBeNull();
+    expect(response.headers.get("payment-required")).toBeNull();
+
+    // The collision holds regardless of which rails a deployment enables.
+    const collision = await hono.request("/res/v1/web/search?q=rust", {
+      headers: {
+        "payment-signature": paymentSignature("/res/v1/web/search"),
+        authorization: await credentialHeader({ type: "hash", hash: "0x0" }),
+      },
+    });
+    expect(collision.status).toBe(400);
   });
 });
