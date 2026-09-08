@@ -14,46 +14,7 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
 jobs:
-  fmt:
-    name: rustfmt
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Show toolchain
-        run: rustup show
-      - name: Format
-        run: cargo fmt --all --check
-
-  clippy:
-    name: clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Show toolchain
-        run: rustup show
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features --locked -- -D warnings
-
-  test:
-    name: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Show toolchain
-        run: rustup show
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          # Shared with the e2e workflows, so they restore this job's build.
-          shared-key: build
-      - name: Test
-        run: cargo test --all-features --locked
-
   ts:
     name: typescript
     runs-on: ubuntu-latest
@@ -76,36 +37,22 @@ jobs:
       - name: Test
         run: pnpm test
 
-  docs:
-    name: doc
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Show toolchain
-        run: rustup show
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Doc
-        run: cargo doc --no-deps --all-features --locked
-        env:
-          RUSTDOCFLAGS: -D warnings
-
   audit:
-    name: cargo-deny
+    name: pnpm-audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          tool: cargo-deny
-      - name: Audit compiled dependencies
-        run: cargo deny --locked check advisories bans
-
-  lockfile:
-    name: lockfile
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Show toolchain
-        run: rustup show
-      - name: Verify Cargo.lock is up to date
-        run: cargo metadata --locked --format-version=1 > /dev/null
+          node-version: 24
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Audit dependencies
+        run: pnpm audit
+      - name: Check for duplicate packages
+        # The npm side of the single-version rule. Two copies of a library that
+        # decodes payments could disagree, which is why `ox` is pinned to one
+        # version in pnpm-workspace.yaml.
+        run: pnpm dedupe --check
