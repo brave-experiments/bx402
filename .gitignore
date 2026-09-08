@@ -1,9 +1,5 @@
 # Build artifacts
-/target
 /ts/dist
-
-# rustfmt backup files
-**/*.rs.bk
 
 /.claude/
 
