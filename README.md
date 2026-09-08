@@ -1,7 +1,7 @@
 # bx402
 
 [![CI](https://github.com/brave-experiments/bx402/actions/workflows/ci.yml/badge.svg)](https://github.com/brave-experiments/bx402/actions/workflows/ci.yml)
-[![made-with-rust](https://img.shields.io/badge/Made%20with-Rust-1f425f.svg)](https://www.rust-lang.org/)
+[![made-with-typescript](https://img.shields.io/badge/Made%20with-TypeScript-3178c6.svg)](https://www.typescriptlang.org/)
 
 A pay-per-request proxy in front of the [Brave Search API](https://brave.com/search/api/).
 Instead of an API key, each request carries a stablecoin micropayment, making the signed payment
@@ -25,8 +25,8 @@ One hostname serves both rails. The rail is chosen by the client's payment heade
 
 ## Prerequisites
 
-You need [`rustup`](https://rustup.rs/) (the pinned toolchain installs on first
-build) and a Brave Search API key (free tier at
+You need [Node.js](https://nodejs.org/) 24 or newer with `corepack enable` (pnpm
+comes from the `packageManager` field), and a Brave Search API key (free tier at
 [brave.com/search/api](https://brave.com/search/api)).
 
 ## Paying for a search on Base Sepolia
@@ -82,7 +82,7 @@ verifying an MPP credential is what settles it. Only the payer needs funding.
    echo "MPP_RPC_URL=https://rpc.moderato.tempo.xyz" >> .env
    echo "MPP_SECRET_KEY=$(openssl rand -hex 32)" >> .env
    echo "ALLOW_TESTNET=true" >> .env
-   cargo run
+   pnpm install && pnpm build && pnpm start
    ```
 2. Create a throwaway payer and fund it from the faucet RPC method:
    ```sh
