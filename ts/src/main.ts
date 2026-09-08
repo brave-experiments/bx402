@@ -46,12 +46,10 @@ async function run(): Promise<void> {
   const { screener, status } = await initScreener(config, metrics);
   log.info(`restricted address screening: ${statusLine(status)}`);
 
-  const server = serve(
-    { fetch: app(config, screener, metrics).fetch, hostname: "0.0.0.0", port: PORT },
-    (address) => {
-      log.info(`listening on ${address.address}:${address.port}`);
-    },
-  );
+  const hono = await app(config, screener, metrics);
+  const server = serve({ fetch: hono.fetch, hostname: "0.0.0.0", port: PORT }, (address) => {
+    log.info(`listening on ${address.address}:${address.port}`);
+  });
 
   // Traffic and metrics are served on separate listeners, so the public port
   // never exposes the metrics. Serve until the process is stopped; a failure on

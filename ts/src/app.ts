@@ -30,17 +30,17 @@ export function banner(): string {
  * binary without binding a socket. The upstream connection pool is passed in so
  * a test can hand over a mock dispatcher instead of reaching the network.
  *
- * Throws when a rail cannot be built from the configuration, so a deployment
- * with an unusable facilitator URL never serves traffic.
+ * Rejects when a rail cannot be built from the configuration, so a deployment
+ * with an unusable facilitator URL or Tempo endpoint never serves traffic.
  */
-export function app(
+export async function app(
   config: Config,
   screener: RestrictedAddressScreener | undefined,
   metrics: Metrics,
   client: Dispatcher = searchClient(),
-): Hono {
+): Promise<Hono> {
   const hono = new Hono();
-  const ctx = context(config, screener, metrics);
+  const ctx = await context(config, screener, metrics);
 
   // Outermost, so the timing covers everything the service does and the count
   // includes requests that match no route.

@@ -1,7 +1,9 @@
 import { HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { type AwsStub, mockClient } from "aws-sdk-client-mock";
+import type { Hono } from "hono";
 import { type Dispatcher, getGlobalDispatcher, MockAgent, setGlobalDispatcher } from "undici";
 import { expect } from "vitest";
+import { app } from "../src/app.js";
 import type { Config } from "../src/config.js";
 import { Metrics } from "../src/metrics.js";
 import { RestrictedAddressScreener } from "../src/screener.js";
@@ -150,6 +152,31 @@ export function restoreNetwork(): void {
     setGlobalDispatcher(previousDispatcher);
     previousDispatcher = undefined;
   }
+}
+
+/**
+ * The chain a test rail runs on, so tests read one name rather than a number.
+ */
+export const TEST_CHAIN_ID = 42431;
+
+/**
+ * Build the app the way a test needs it: an enabled MPP rail asks its endpoint
+ * which chain it serves before the app exists, so stand in for that endpoint
+ * first. A test that disables the rail gets no stub, which is what proves a
+ * disabled rail never queries a chain.
+ */
+export async function buildApp(
+  config: Config,
+  screener: RestrictedAddressScreener | undefined,
+  metrics: Metrics,
+  dispatcher?: Dispatcher,
+): Promise<Hono> {
+  if (config.mpp !== undefined) {
+    mockTempoRpc(TEST_CHAIN_ID);
+  }
+  return dispatcher === undefined
+    ? app(config, screener, metrics)
+    : app(config, screener, metrics, dispatcher);
 }
 
 /**

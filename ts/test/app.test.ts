@@ -8,6 +8,7 @@ import { searchClient } from "../src/search.js";
 import {
   assertNotRecorded,
   assertRecorded,
+  buildApp,
   decodeChallenge,
   mockFacilitator,
   paymentSignature,
@@ -78,10 +79,9 @@ async function paidX402(
     .reply(upstreamStatus, {}, { headers: { "content-type": "application/json" } });
   mockFacilitator(valid, settles);
   const metrics = new Metrics();
-  const response = await app(testConfig({ mpp: undefined }), undefined, metrics, mock).request(
-    "/res/v1/web/search?q=rust",
-    paid("/res/v1/web/search"),
-  );
+  const response = await (
+    await buildApp(testConfig({ mpp: undefined }), undefined, metrics, mock)
+  ).request("/res/v1/web/search?q=rust", paid("/res/v1/web/search"));
   await agent?.close();
   agent = undefined;
   restoreNetwork();
@@ -110,13 +110,15 @@ describe("app", () => {
   });
 
   it("health_returns_200", async () => {
-    const response = await app(testConfig(), undefined, new Metrics()).request("/health");
+    const response = await (await buildApp(testConfig(), undefined, new Metrics())).request(
+      "/health",
+    );
     expect(response.status).toBe(200);
   });
 
   it("an_unsold_endpoint_is_404_not_a_payable_402", async () => {
     // The Answers API is deliberately not sold.
-    const response = await app(testConfig(), undefined, new Metrics()).request(
+    const response = await (await buildApp(testConfig(), undefined, new Metrics())).request(
       "/res/v1/chat/completions",
     );
     expect(response.status).toBe(404);
@@ -124,7 +126,7 @@ describe("app", () => {
 
   it("unsupported_method_is_405_not_a_payable_402", async () => {
     // A POST must get the plain 405, not a challenge whose payment would buy a 405.
-    const response = await app(testConfig(), undefined, new Metrics()).request(
+    const response = await (await buildApp(testConfig(), undefined, new Metrics())).request(
       "/res/v1/web/search?q=rust",
       {
         method: "POST",
@@ -149,7 +151,7 @@ describe("app", () => {
       })
       .reply(200, upstreamBody, { headers: { "content-type": "application/json" } });
 
-    const response = await app(testConfig(), undefined, new Metrics(), mock).request(
+    const response = await (await buildApp(testConfig(), undefined, new Metrics(), mock)).request(
       "/res/v1/web/search?q=rust",
       paid("/res/v1/web/search"),
     );
@@ -168,7 +170,7 @@ describe("app", () => {
       .intercept({ method: "GET", path: "/res/v1/web/search?q=rust" })
       .reply(500, "brave is down");
 
-    const response = await app(testConfig(), undefined, new Metrics(), mock).request(
+    const response = await (await buildApp(testConfig(), undefined, new Metrics(), mock)).request(
       "/res/v1/web/search?q=rust",
       paid("/res/v1/web/search"),
     );
@@ -183,10 +185,9 @@ describe("app", () => {
     // maps to 502. That is distinct from an upstream that answers with a 5xx,
     // relayed as it is by the test above.
     const config = testConfig({ braveSearchApiBaseUrl: "http://127.0.0.1:1" });
-    const response = await app(config, undefined, new Metrics(), searchClient()).request(
-      "/res/v1/web/search?q=rust",
-      paid("/res/v1/web/search"),
-    );
+    const response = await (
+      await buildApp(config, undefined, new Metrics(), searchClient())
+    ).request("/res/v1/web/search?q=rust", paid("/res/v1/web/search"));
 
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({ error: "upstream error" });
@@ -194,7 +195,7 @@ describe("app", () => {
 
   it("every_request_is_counted_with_its_endpoint_method_and_status", async () => {
     const metrics = new Metrics();
-    const response = await app(testConfig(), undefined, metrics).request("/health");
+    const response = await (await buildApp(testConfig(), undefined, metrics)).request("/health");
     expect(response.status).toBe(200);
 
     await assertRecorded(
@@ -211,7 +212,7 @@ describe("app", () => {
   // label, so requests for paths that do not exist cannot grow the series.
   it("an_unsold_path_is_counted_without_minting_a_label", async () => {
     const metrics = new Metrics();
-    const response = await app(testConfig(), undefined, metrics).request(
+    const response = await (await buildApp(testConfig(), undefined, metrics)).request(
       "/res/v1/chat/completions",
     );
     expect(response.status).toBe(404);
@@ -232,7 +233,7 @@ describe("app", () => {
 
     mockFacilitator(true, true);
     const metrics = new Metrics();
-    const response = await app(testConfig(), undefined, metrics, mock).request(
+    const response = await (await buildApp(testConfig(), undefined, metrics, mock)).request(
       "/res/v1/web/search?q=rust",
       paid("/res/v1/web/search"),
     );
@@ -254,7 +255,7 @@ describe("app", () => {
     mockFacilitator(true, true);
     const config = testConfig({ braveSearchApiBaseUrl: "http://127.0.0.1:1" });
     const metrics = new Metrics();
-    const response = await app(config, undefined, metrics, searchClient()).request(
+    const response = await (await buildApp(config, undefined, metrics, searchClient())).request(
       "/res/v1/web/search?q=rust",
       paid("/res/v1/web/search"),
     );
@@ -265,13 +266,22 @@ describe("app", () => {
       'bx402_upstream_requests_total{endpoint="/res/v1/web/search",status="connect"} 1',
     );
   });
-  it("app_rejects_an_unparseable_facilitator_url", () => {
+  it("app_rejects_an_unparseable_facilitator_url", async () => {
     const config = testConfig({ x402: { facilitatorUrl: "not a url" }, mpp: undefined });
-    expect(() => app(config, undefined, new Metrics())).toThrow("invalid configuration");
+    await expect(buildApp(config, undefined, new Metrics())).rejects.toThrow(
+      "invalid configuration",
+    );
+  });
+
+  it("app_rejects_an_unreachable_tempo_endpoint", async () => {
+    // Built through `app` rather than `buildApp`, so nothing stands in for the
+    // endpoint. The rail asks it which chain it serves and gets no answer, which
+    // aborts startup rather than serving a rail that cannot price anything.
+    await expect(app(testConfig(), undefined, new Metrics())).rejects.toThrow("MPP_RPC_URL");
   });
 
   it("each_endpoint_answers_a_cold_402_at_its_own_price", async () => {
-    const hono = app(testConfig({ mpp: undefined }), undefined, new Metrics());
+    const hono = await buildApp(testConfig({ mpp: undefined }), undefined, new Metrics());
 
     for (const endpoint of ENDPOINTS) {
       const response = await hono.request(endpoint.path);
@@ -289,7 +299,7 @@ describe("app", () => {
   // formed and accepts an offer we really do advertise, just not for the path it
   // is sent to, so only the per-path lookup refuses it.
   it("a_cheap_endpoints_payment_does_not_buy_a_dear_one", async () => {
-    const hono = app(testConfig({ mpp: undefined }), undefined, new Metrics());
+    const hono = await buildApp(testConfig({ mpp: undefined }), undefined, new Metrics());
 
     // Refused before the facilitator is consulted, which is why an unreachable
     // facilitator here still yields a 402 rather than a 502.
@@ -303,10 +313,11 @@ describe("app", () => {
     // End to end: a cold request through the real router must echo back the
     // exact URL it hit as `resource.url`, built from the proxy headers with the
     // query kept.
-    const response = await app(testConfig({ mpp: undefined }), undefined, new Metrics()).request(
-      "/res/v1/web/search?q=rust",
-      { headers: { host: "api.bx402.io", "x-forwarded-proto": "https" } },
-    );
+    const response = await (
+      await buildApp(testConfig({ mpp: undefined }), undefined, new Metrics())
+    ).request("/res/v1/web/search?q=rust", {
+      headers: { host: "api.bx402.io", "x-forwarded-proto": "https" },
+    });
 
     expect(response.status).toBe(402);
     const challenge = decodeChallenge(response.headers.get("payment-required") as string) as {
@@ -319,10 +330,9 @@ describe("app", () => {
   });
 
   it("x402_only_app_needs_no_rpc_and_cold_402s_an_mpp_attempt", async () => {
-    const response = await app(testConfig({ mpp: undefined }), undefined, new Metrics()).request(
-      "/res/v1/web/search?q=rust",
-      { headers: { authorization: "Payment test-cred" } },
-    );
+    const response = await (
+      await buildApp(testConfig({ mpp: undefined }), undefined, new Metrics())
+    ).request("/res/v1/web/search?q=rust", { headers: { authorization: "Payment test-cred" } });
 
     expect(response.status).toBe(402);
     expect(response.headers.get("payment-required")).not.toBeNull();
@@ -332,7 +342,7 @@ describe("app", () => {
 
   it("no_rails_app_402s_every_payment_attempt", async () => {
     const config = testConfig({ x402: undefined, mpp: undefined });
-    const hono = app(config, undefined, new Metrics());
+    const hono = await buildApp(config, undefined, new Metrics());
 
     const attempts: Record<string, string>[] = [
       {},
@@ -353,7 +363,7 @@ describe("app", () => {
 
   it("challenges_record_why_they_were_issued", async () => {
     const metrics = new Metrics();
-    const hono = app(testConfig({ mpp: undefined }), undefined, metrics);
+    const hono = await buildApp(testConfig({ mpp: undefined }), undefined, metrics);
 
     const cases: [Record<string, string>, string][] = [
       [{}, "no_payment"],
@@ -375,9 +385,12 @@ describe("app", () => {
     const metrics = new Metrics();
     const config = testConfig({ x402: undefined, mpp: undefined });
 
-    const response = await app(config, undefined, metrics).request("/res/v1/web/search?q=rust", {
-      headers: { "payment-signature": "sig" },
-    });
+    const response = await (await buildApp(config, undefined, metrics)).request(
+      "/res/v1/web/search?q=rust",
+      {
+        headers: { "payment-signature": "sig" },
+      },
+    );
     expect(response.status).toBe(402);
 
     await assertRecorded(
@@ -432,11 +445,8 @@ describe("app", () => {
       .reply(200, upstreamBody, { headers: { "content-type": "application/json" } });
     mockFacilitator(true, true);
 
-    const response = await app(
-      testConfig({ mpp: undefined }),
-      undefined,
-      new Metrics(),
-      mock,
+    const response = await (
+      await buildApp(testConfig({ mpp: undefined }), undefined, new Metrics(), mock)
     ).request("/res/v1/web/search?q=rust", paid("/res/v1/web/search"));
 
     expect(response.status).toBe(200);
@@ -453,11 +463,8 @@ describe("app", () => {
     const mock = mockUpstream();
     mockFacilitator(false, true);
 
-    const response = await app(
-      testConfig({ mpp: undefined }),
-      undefined,
-      new Metrics(),
-      mock,
+    const response = await (
+      await buildApp(testConfig({ mpp: undefined }), undefined, new Metrics(), mock)
     ).request("/res/v1/web/search?q=rust", paid("/res/v1/web/search"));
 
     expect(response.status).toBe(402);
@@ -476,11 +483,8 @@ describe("app", () => {
       .reply(200, { web: {} }, { headers: { "content-type": "application/json" } });
     mockFacilitator(true, false);
 
-    const response = await app(
-      testConfig({ mpp: undefined }),
-      undefined,
-      new Metrics(),
-      mock,
+    const response = await (
+      await buildApp(testConfig({ mpp: undefined }), undefined, new Metrics(), mock)
     ).request("/res/v1/web/search?q=rust", paid("/res/v1/web/search"));
 
     expect(response.status).toBe(502);
@@ -497,11 +501,8 @@ describe("app", () => {
     // unreachable, so reaching either would surface as something other than 402.
     const mock = mockUpstream();
 
-    const response = await app(
-      testConfig({ mpp: undefined }),
-      screener,
-      new Metrics(),
-      mock,
+    const response = await (
+      await buildApp(testConfig({ mpp: undefined }), screener, new Metrics(), mock)
     ).request("/res/v1/web/search?q=rust", paidFrom("/res/v1/web/search", from));
 
     expect(response.status).toBe(402);
@@ -517,11 +518,8 @@ describe("app", () => {
       .reply(200, { web: {} }, { headers: { "content-type": "application/json" } });
     mockFacilitator(true, true);
 
-    const response = await app(
-      testConfig({ mpp: undefined }),
-      screener,
-      new Metrics(),
-      mock,
+    const response = await (
+      await buildApp(testConfig({ mpp: undefined }), screener, new Metrics(), mock)
     ).request(
       "/res/v1/web/search?q=rust",
       paidFrom("/res/v1/web/search", "0x1111111111111111111111111111111111111111"),
@@ -536,11 +534,8 @@ describe("app", () => {
     const screener = screenerAnswering(500);
     const mock = mockUpstream();
 
-    const response = await app(
-      testConfig({ mpp: undefined }),
-      screener,
-      new Metrics(),
-      mock,
+    const response = await (
+      await buildApp(testConfig({ mpp: undefined }), screener, new Metrics(), mock)
     ).request(
       "/res/v1/web/search?q=rust",
       paidFrom("/res/v1/web/search", "0x2222222222222222222222222222222222222222"),
@@ -555,10 +550,9 @@ describe("app", () => {
     const screener = screenerBlocking(from, metrics);
     const mock = mockUpstream();
 
-    const response = await app(testConfig({ mpp: undefined }), screener, metrics, mock).request(
-      "/res/v1/web/search?q=rust",
-      paidFrom("/res/v1/web/search", from),
-    );
+    const response = await (
+      await buildApp(testConfig({ mpp: undefined }), screener, metrics, mock)
+    ).request("/res/v1/web/search?q=rust", paidFrom("/res/v1/web/search", from));
 
     expect(response.status).toBe(402);
     await assertPaymentOutcome(metrics, "x402", "screened_out");

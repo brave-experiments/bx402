@@ -58,6 +58,7 @@ export function classify(headers: Headers): Rail {
  */
 export interface Context {
   x402: x402.Client | undefined;
+  mpp: mpp.Client | undefined;
   /** Payer screener, shared by every rail. Absent when screening is off. */
   screener: RestrictedAddressScreener | undefined;
   /** Where every rail records what happened. */
@@ -68,14 +69,23 @@ export interface Context {
  * Assemble the dispatch context from config and the already-built screener (the
  * screener is built asynchronously at startup, so it is passed in rather than
  * built here).
+ *
+ * The MPP rail asks its endpoint which chain it serves before it can price
+ * anything, which is what makes this asynchronous. A disabled rail is skipped
+ * entirely, so a deployment that runs x402 alone never queries a chain.
  */
-export function context(
+export async function context(
   config: Config,
   screener: RestrictedAddressScreener | undefined,
   metrics: Metrics,
-): Context {
+): Promise<Context> {
+  // x402 is built first, so an unusable facilitator URL is reported before any
+  // RPC traffic goes out.
+  const x402Client =
+    config.x402 === undefined ? undefined : x402.client(config.x402, config.allowTestnet);
   return {
-    x402: config.x402 === undefined ? undefined : x402.client(config.x402, config.allowTestnet),
+    x402: x402Client,
+    mpp: config.mpp === undefined ? undefined : await mpp.client(config.mpp, config.allowTestnet),
     screener,
     metrics,
   };
