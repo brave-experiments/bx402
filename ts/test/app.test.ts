@@ -82,9 +82,10 @@ async function paidX402(
     .reply(upstreamStatus, {}, { headers: { "content-type": "application/json" } });
   mockFacilitator(valid, settles);
   const metrics = new Metrics();
-  const response = await (
-    await buildApp(testConfig({ mpp: undefined }), undefined, metrics, mock)
-  ).request("/res/v1/web/search?q=rust", paid("/res/v1/web/search"));
+  const response = await (await buildApp(testConfig(), undefined, metrics, mock)).request(
+    "/res/v1/web/search?q=rust",
+    paid("/res/v1/web/search"),
+  );
   await agent?.close();
   agent = undefined;
   restoreNetwork();
@@ -270,7 +271,7 @@ describe("app", () => {
     );
   });
   it("app_rejects_an_unparseable_facilitator_url", async () => {
-    const config = testConfig({ x402: { facilitatorUrl: "not a url" }, mpp: undefined });
+    const config = testConfig({ x402: { facilitatorUrl: "not a url" } });
     await expect(buildApp(config, undefined, new Metrics())).rejects.toThrow(
       "invalid configuration",
     );
@@ -284,7 +285,7 @@ describe("app", () => {
   });
 
   it("each_endpoint_answers_a_cold_402_at_its_own_price", async () => {
-    const hono = await buildApp(testConfig({ mpp: undefined }), undefined, new Metrics());
+    const hono = await buildApp(testConfig(), undefined, new Metrics());
 
     for (const endpoint of ENDPOINTS) {
       const response = await hono.request(endpoint.path);
@@ -302,7 +303,7 @@ describe("app", () => {
   // formed and accepts an offer we really do advertise, just not for the path it
   // is sent to, so only the per-path lookup refuses it.
   it("a_cheap_endpoints_payment_does_not_buy_a_dear_one", async () => {
-    const hono = await buildApp(testConfig({ mpp: undefined }), undefined, new Metrics());
+    const hono = await buildApp(testConfig(), undefined, new Metrics());
 
     // Refused before the facilitator is consulted, which is why an unreachable
     // facilitator here still yields a 402 rather than a 502.
@@ -316,11 +317,12 @@ describe("app", () => {
     // End to end: a cold request through the real router must echo back the
     // exact URL it hit as `resource.url`, built from the proxy headers with the
     // query kept.
-    const response = await (
-      await buildApp(testConfig({ mpp: undefined }), undefined, new Metrics())
-    ).request("/res/v1/web/search?q=rust", {
-      headers: { host: "api.bx402.io", "x-forwarded-proto": "https" },
-    });
+    const response = await (await buildApp(testConfig(), undefined, new Metrics())).request(
+      "/res/v1/web/search?q=rust",
+      {
+        headers: { host: "api.bx402.io", "x-forwarded-proto": "https" },
+      },
+    );
 
     expect(response.status).toBe(402);
     const challenge = decodeChallenge(response.headers.get("payment-required") as string) as {
@@ -366,7 +368,7 @@ describe("app", () => {
 
   it("challenges_record_why_they_were_issued", async () => {
     const metrics = new Metrics();
-    const hono = await buildApp(testConfig({ mpp: undefined }), undefined, metrics);
+    const hono = await buildApp(testConfig(), undefined, metrics);
 
     const cases: [Record<string, string>, string][] = [
       [{}, "no_payment"],
@@ -448,9 +450,10 @@ describe("app", () => {
       .reply(200, upstreamBody, { headers: { "content-type": "application/json" } });
     mockFacilitator(true, true);
 
-    const response = await (
-      await buildApp(testConfig({ mpp: undefined }), undefined, new Metrics(), mock)
-    ).request("/res/v1/web/search?q=rust", paid("/res/v1/web/search"));
+    const response = await (await buildApp(testConfig(), undefined, new Metrics(), mock)).request(
+      "/res/v1/web/search?q=rust",
+      paid("/res/v1/web/search"),
+    );
 
     expect(response.status).toBe(200);
     // The settlement receipt rides back base64-encoded in `Payment-Response`.
@@ -466,9 +469,10 @@ describe("app", () => {
     const mock = mockUpstream();
     mockFacilitator(false, true);
 
-    const response = await (
-      await buildApp(testConfig({ mpp: undefined }), undefined, new Metrics(), mock)
-    ).request("/res/v1/web/search?q=rust", paid("/res/v1/web/search"));
+    const response = await (await buildApp(testConfig(), undefined, new Metrics(), mock)).request(
+      "/res/v1/web/search?q=rust",
+      paid("/res/v1/web/search"),
+    );
 
     expect(response.status).toBe(402);
     // Nothing settled, so no receipt.
@@ -486,9 +490,10 @@ describe("app", () => {
       .reply(200, { web: {} }, { headers: { "content-type": "application/json" } });
     mockFacilitator(true, false);
 
-    const response = await (
-      await buildApp(testConfig({ mpp: undefined }), undefined, new Metrics(), mock)
-    ).request("/res/v1/web/search?q=rust", paid("/res/v1/web/search"));
+    const response = await (await buildApp(testConfig(), undefined, new Metrics(), mock)).request(
+      "/res/v1/web/search?q=rust",
+      paid("/res/v1/web/search"),
+    );
 
     expect(response.status).toBe(502);
     expect(response.headers.get("payment-response")).toBeNull();
@@ -504,9 +509,10 @@ describe("app", () => {
     // unreachable, so reaching either would surface as something other than 402.
     const mock = mockUpstream();
 
-    const response = await (
-      await buildApp(testConfig({ mpp: undefined }), screener, new Metrics(), mock)
-    ).request("/res/v1/web/search?q=rust", paidFrom("/res/v1/web/search", from));
+    const response = await (await buildApp(testConfig(), screener, new Metrics(), mock)).request(
+      "/res/v1/web/search?q=rust",
+      paidFrom("/res/v1/web/search", from),
+    );
 
     expect(response.status).toBe(402);
   });
@@ -521,9 +527,7 @@ describe("app", () => {
       .reply(200, { web: {} }, { headers: { "content-type": "application/json" } });
     mockFacilitator(true, true);
 
-    const response = await (
-      await buildApp(testConfig({ mpp: undefined }), screener, new Metrics(), mock)
-    ).request(
+    const response = await (await buildApp(testConfig(), screener, new Metrics(), mock)).request(
       "/res/v1/web/search?q=rust",
       paidFrom("/res/v1/web/search", "0x1111111111111111111111111111111111111111"),
     );
@@ -537,9 +541,7 @@ describe("app", () => {
     const screener = screenerAnswering(500);
     const mock = mockUpstream();
 
-    const response = await (
-      await buildApp(testConfig({ mpp: undefined }), screener, new Metrics(), mock)
-    ).request(
+    const response = await (await buildApp(testConfig(), screener, new Metrics(), mock)).request(
       "/res/v1/web/search?q=rust",
       paidFrom("/res/v1/web/search", "0x2222222222222222222222222222222222222222"),
     );
@@ -553,9 +555,10 @@ describe("app", () => {
     const screener = screenerBlocking(from, metrics);
     const mock = mockUpstream();
 
-    const response = await (
-      await buildApp(testConfig({ mpp: undefined }), screener, metrics, mock)
-    ).request("/res/v1/web/search?q=rust", paidFrom("/res/v1/web/search", from));
+    const response = await (await buildApp(testConfig(), screener, metrics, mock)).request(
+      "/res/v1/web/search?q=rust",
+      paidFrom("/res/v1/web/search", from),
+    );
 
     expect(response.status).toBe(402);
     await assertPaymentOutcome(metrics, "x402", "screened_out");
