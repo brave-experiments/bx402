@@ -1,7 +1,10 @@
 import { HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { type AwsStub, mockClient } from "aws-sdk-client-mock";
 import type { Hono } from "hono";
+import * as Secp256k1 from "ox/Secp256k1";
+import { TxEnvelopeTempo } from "ox/tempo";
 import { type Dispatcher, getGlobalDispatcher, MockAgent, setGlobalDispatcher } from "undici";
+import { privateKeyToAccount } from "viem/accounts";
 import { expect } from "vitest";
 import { app } from "../src/app.js";
 import type { Config } from "../src/config.js";
@@ -177,6 +180,38 @@ export async function buildApp(
   return dispatcher === undefined
     ? app(config, screener, metrics)
     : app(config, screener, metrics, dispatcher);
+}
+
+/** The key every forged transaction is signed with, and the address it recovers to. */
+const TEST_KEY = `0x${"01".repeat(32)}` as const;
+export const TEST_SIGNER = privateKeyToAccount(TEST_KEY).address.toLowerCase();
+
+/**
+ * A real signed Tempo transaction, and the address that signed it.
+ *
+ * Signed at test time rather than pasted in, so the bytes stay aligned with the
+ * encoding the current libraries produce. The recipient, chain, and gas are
+ * arbitrary: the transfer never verifies, it only has to decode and carry a real
+ * signature.
+ */
+export function forgedTransaction(): { transaction: string; signer: string } {
+  const envelope = TxEnvelopeTempo.from({
+    type: "tempo",
+    chainId: TEST_CHAIN_ID,
+    calls: [{ to: `0x${"42".repeat(20)}`, value: 0n, data: "0x" }],
+    gas: 100_000n,
+    maxFeePerGas: 1n,
+    maxPriorityFeePerGas: 1n,
+    nonce: 0n,
+  });
+  const signature = Secp256k1.sign({
+    payload: TxEnvelopeTempo.getSignPayload(envelope),
+    privateKey: TEST_KEY,
+  });
+  return {
+    transaction: TxEnvelopeTempo.serialize(envelope, { signature }),
+    signer: TEST_SIGNER,
+  };
 }
 
 /**

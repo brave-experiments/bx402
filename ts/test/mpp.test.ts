@@ -1,8 +1,8 @@
-import { Challenge } from "mppx";
+import { Challenge, type Credential } from "mppx";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Config, MppConfig } from "../src/config.js";
-import { challenge, client } from "../src/mpp.js";
-import { mockTempoRpc, restoreNetwork, testConfig } from "./support.js";
+import { challenge, client, credential, signerAddress, transactionPayload } from "../src/mpp.js";
+import { forgedTransaction, mockTempoRpc, restoreNetwork, testConfig } from "./support.js";
 
 /** Tempo mainnet and the Moderato testnet, the two chains this rail serves. */
 const MAINNET = 4217;
@@ -26,6 +26,20 @@ function mppRail(config: Config): MppConfig {
 async function clientOn(config: Config, chain: number) {
   mockTempoRpc(chain);
   return client(mppRail(config), config.allowTestnet);
+}
+
+/**
+ * A minimal challenge to sit beside a payload, so the payload gate reads only
+ * what is next to it rather than anything this echo says.
+ */
+function echo(): Challenge.Challenge {
+  return {
+    id: "id",
+    realm: "bx402",
+    method: "tempo",
+    intent: "charge",
+    request: {},
+  } as Challenge.Challenge;
 }
 
 afterEach(() => {
@@ -101,5 +115,62 @@ describe("mpp", () => {
     }
     // Any other chain is refused rather than served with a default token.
     await expect(clientOn(testConfig(), 1)).rejects.toThrow("unsupported Tempo chain 1");
+  });
+
+  it("only_a_signed_transaction_payload_pays", () => {
+    interface PayloadCase {
+      /** Label printed if the assertion fails. */
+      name: string;
+      /** The credential payload to offer. */
+      payload: unknown;
+      /** Whether that payload is one this rail broadcasts. */
+      expected: boolean;
+    }
+    const cases: PayloadCase[] = [
+      {
+        name: "transaction",
+        payload: { type: "transaction", signature: "0xsigned" },
+        expected: true,
+      },
+      { name: "hash", payload: { type: "hash", hash: "0xhash" }, expected: false },
+      { name: "proof", payload: { type: "proof", signature: "0xsig" }, expected: false },
+      { name: "arbitrary json", payload: { type: "mystery" }, expected: false },
+    ];
+    for (const { name, payload, expected } of cases) {
+      const parsed = { challenge: echo(), payload } as Credential.Credential;
+      expect(transactionPayload(parsed) !== undefined, `case: ${name}`).toBe(expected);
+    }
+  });
+
+  it("signer_recovery_matches_the_signing_key", () => {
+    // The recovery decodes the transaction independently of the SDK, so it must
+    // land on exactly the key that signed it.
+    const { transaction, signer } = forgedTransaction();
+    expect(signerAddress({ type: "transaction", signature: transaction })).toBe(signer);
+  });
+
+  it("signer_recovery_requires_a_decodable_signed_transaction", () => {
+    const cases: [string, string][] = [
+      ["garbage hex", "0xno"],
+      ["not hex at all", "zzz"],
+      ["empty", ""],
+      ["not a tempo transaction", "0x02f8"],
+    ];
+    for (const [name, signature] of cases) {
+      expect(signerAddress({ type: "transaction", signature }), `case: ${name}`).toBeUndefined();
+    }
+  });
+
+  it("credential_requires_the_payment_scheme", () => {
+    const cases: [string, string][] = [
+      ["bearer token", "Bearer abc123"],
+      ["payment but not a credential", "Payment not-base64-json"],
+      ["empty", ""],
+    ];
+    for (const [name, value] of cases) {
+      const headers = new Headers({ authorization: value });
+      expect(credential(headers), `case: ${name}`).toBeUndefined();
+    }
+    expect(credential(new Headers()), "case: no header").toBeUndefined();
   });
 });

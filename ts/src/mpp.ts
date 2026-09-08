@@ -6,8 +6,10 @@
  * classifies each request and delegates to whichever rail it is paying on.
  */
 
-import { Challenge } from "mppx";
+import { Challenge, Credential } from "mppx";
 import { Mppx, tempo } from "mppx/server";
+import * as Secp256k1 from "ox/Secp256k1";
+import { TxEnvelopeTempo } from "ox/tempo";
 import { request } from "undici";
 import type { Chain } from "viem";
 import { formatUnits } from "viem";
@@ -53,6 +55,9 @@ const PATH_USD = "0x20c0000000000000000000000000000000000000";
 
 /** How many decimals pathUSD carries, the scale every amount is written in. */
 const CURRENCY_DECIMALS = 6;
+
+/** The leading byte that marks a serialized Tempo transaction. */
+const TEMPO_TX_TYPE = "0x76";
 
 /** How long to wait for the endpoint to report its chain before giving up. */
 const CHAIN_QUERY_TIMEOUT_MS = 5_000;
@@ -238,6 +243,91 @@ async function getChainId(rpcUrl: string): Promise<number> {
     throw invalid(`eth_chainId returned no chain id: ${JSON.stringify(body)}`);
   }
   return chainId;
+}
+
+/**
+ * The credential payload that pays here: a signed transaction this service
+ * broadcasts while verifying it.
+ */
+export interface TransactionPayload {
+  type: "transaction";
+  signature: string;
+}
+
+/**
+ * The MPP credential carried in the `Authorization` header. `undefined` when the
+ * header is absent or is not the `Payment <credential>` form, including when it
+ * carries some other scheme entirely.
+ */
+export function credential(headers: Headers): Credential.Credential | undefined {
+  const header = headers.get(CREDENTIAL_HEADER);
+  if (header === null) {
+    return undefined;
+  }
+  // A header may carry several schemes at once, so pick ours out rather than
+  // assuming it stands alone.
+  const scheme = Credential.extractPaymentScheme(header);
+  if (scheme === null) {
+    return undefined;
+  }
+  try {
+    return Credential.deserialize(scheme);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The credential's payload, if it pays with a signed transaction.
+ *
+ * A hash credential says the client already broadcast the transfer itself,
+ * settling before anything was checked, so it does not pay here. Neither does a
+ * proof, which authorizes nothing to move.
+ */
+export function transactionPayload(parsed: Credential.Credential): TransactionPayload | undefined {
+  const payload = parsed.payload;
+  if (typeof payload !== "object" || payload === null) {
+    return undefined;
+  }
+  const { type, signature } = payload as { type?: unknown; signature?: unknown };
+  if (type !== "transaction" || typeof signature !== "string") {
+    return undefined;
+  }
+  return { type, signature };
+}
+
+/**
+ * The payer, recovered from the signed transaction's own signature: the address
+ * the transfer draws from, independent of anything the credential claims.
+ *
+ * Decoded here rather than asked of the SDK, so the address we screen does not
+ * depend on the same code that decides whether the payment is good. Lowercase
+ * hex, the screener's canonical form for EVM addresses. `undefined` when the
+ * payload carries no decodable signed transaction, which verification would
+ * refuse anyway.
+ */
+export function signerAddress(payload: TransactionPayload): string | undefined {
+  // Tempo transactions carry their type byte, which is what says how to read the
+  // rest. Anything else is not one, whatever it decodes to.
+  if (!payload.signature.startsWith(TEMPO_TX_TYPE)) {
+    return undefined;
+  }
+  try {
+    const envelope = TxEnvelopeTempo.deserialize(payload.signature as `0x76${string}`);
+    // An unsigned or half-formed signature names no payer, so there is nobody to
+    // screen and nothing to recover from.
+    const signature = envelope.signature?.signature;
+    if (signature === undefined || signature.yParity === undefined) {
+      return undefined;
+    }
+    const recovered = Secp256k1.recoverAddress({
+      payload: TxEnvelopeTempo.getSignPayload(envelope),
+      signature: { r: signature.r, s: signature.s, yParity: signature.yParity },
+    });
+    return recovered.toLowerCase();
+  } catch {
+    return undefined;
+  }
 }
 
 /** The message of a failure, for one log line. */
