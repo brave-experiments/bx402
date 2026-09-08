@@ -16,7 +16,9 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     braveSearchApiKey: "secret-key",
     braveSearchApiBaseUrl: "http://upstream.invalid",
     x402: { facilitatorUrl: "http://facilitator.invalid" },
-    mpp: { rpcUrl: "http://tempo.invalid", secretKey: "test-secret" },
+    // The SDK refuses a secret key under 32 bytes, so this one is long enough to
+    // build a handler with.
+    mpp: { rpcUrl: "http://tempo.invalid", secretKey: "test-secret-of-at-least-32-bytes" },
     restrictedAddressS3Bucket: undefined,
     allowTestnet: true,
     ...overrides,
@@ -76,16 +78,32 @@ export function unreachableS3Client(): S3Client {
 export const TEST_FACILITATOR = "http://facilitator.invalid";
 
 let previousDispatcher: Dispatcher | undefined;
+let installed: MockAgent | undefined;
 
 /**
- * Stand in for the x402 facilitator on the global dispatcher, which is what the
- * SDK's client calls: `POST /verify` reports `valid`, `POST /settle` reports
+ * The mock agent every stub shares, installed on the global dispatcher the first
+ * time one is asked for. One agent rather than one per stub, so a dual-rail test
+ * can stand in for the facilitator and the Tempo endpoint at the same time
+ * without the two replacing each other.
+ */
+function mockNetwork(): MockAgent {
+  if (installed === undefined) {
+    installed = new MockAgent();
+    installed.disableNetConnect();
+    previousDispatcher = getGlobalDispatcher();
+    setGlobalDispatcher(installed);
+  }
+  return installed;
+}
+
+/**
+ * Stand in for the x402 facilitator, which the SDK's client calls over the
+ * global dispatcher: `POST /verify` reports `valid`, `POST /settle` reports
  * `settles`. The two are independent so a test can drive any verify/settle
- * pairing. Call `restoreFacilitator` afterwards.
+ * pairing. Call `restoreNetwork` afterwards.
  */
 export function mockFacilitator(valid: boolean, settles: boolean): MockAgent {
-  const agent = new MockAgent();
-  agent.disableNetConnect();
+  const agent = mockNetwork();
   const pool = agent.get(TEST_FACILITATOR);
   pool.intercept({ method: "POST", path: "/verify" }).reply(200, { isValid: valid }).persist();
   pool
@@ -102,13 +120,32 @@ export function mockFacilitator(valid: boolean, settles: boolean): MockAgent {
           },
     )
     .persist();
-  previousDispatcher = getGlobalDispatcher();
-  setGlobalDispatcher(agent);
   return agent;
 }
 
-/** Put the real global dispatcher back after `mockFacilitator`. */
-export function restoreFacilitator(): void {
+/** The Tempo RPC endpoint the test config points at. */
+export const TEST_TEMPO_RPC = "http://tempo.invalid";
+
+/**
+ * Stand in for the Tempo RPC endpoint, answering one `eth_chainId` with `chainId`.
+ *
+ * Answered once and no more, so a later call finds nothing bound and fails as a
+ * transport error. That is what a test needs to drive the unreachable-endpoint
+ * path: the rail builds at startup, then the charge it tries has no endpoint to
+ * reach.
+ */
+export function mockTempoRpc(chainId: number): MockAgent {
+  const agent = mockNetwork();
+  agent
+    .get(TEST_TEMPO_RPC)
+    .intercept({ method: "POST", path: "/" })
+    .reply(200, { jsonrpc: "2.0", id: 1, result: `0x${chainId.toString(16)}` });
+  return agent;
+}
+
+/** Put the real global dispatcher back after any of the network stubs. */
+export function restoreNetwork(): void {
+  installed = undefined;
   if (previousDispatcher !== undefined) {
     setGlobalDispatcher(previousDispatcher);
     previousDispatcher = undefined;

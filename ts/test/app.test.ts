@@ -11,7 +11,7 @@ import {
   decodeChallenge,
   mockFacilitator,
   paymentSignature,
-  restoreFacilitator,
+  restoreNetwork,
   restoreS3,
   screenerAnswering,
   screenerBlocking,
@@ -39,7 +39,7 @@ function mockUpstream(): MockAgent {
 afterEach(async () => {
   await agent?.close();
   agent = undefined;
-  restoreFacilitator();
+  restoreNetwork();
   restoreS3();
 });
 
@@ -84,7 +84,7 @@ async function paidX402(
   );
   await agent?.close();
   agent = undefined;
-  restoreFacilitator();
+  restoreNetwork();
   return { response, metrics };
 }
 
