@@ -1,5 +1,5 @@
 /**
- * Typed application errors and their HTTP representation.
+ * Typed application errors, and the response shapes every module answers with.
  */
 
 /**
@@ -83,6 +83,19 @@ export class AppError extends Error {
  */
 export function jsonError(status: number, detail: string): Response {
   return Response.json({ error: detail }, { status });
+}
+
+/**
+ * A response carrying no body, framed with an explicit zero length.
+ *
+ * Node's server falls back to chunked encoding for a null body, which tells a
+ * client a body may still be coming. Saying the length outright keeps an empty
+ * answer framed as one.
+ */
+export function emptyBody(status: number, headers?: Headers | Record<string, string>): Response {
+  const stated = new Headers(headers);
+  stated.set("content-length", "0");
+  return new Response(null, { status, headers: stated });
 }
 
 /** A generic `503` for a payer that could not be screened, identical on every rail. */

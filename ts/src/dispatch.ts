@@ -16,7 +16,7 @@
 
 import type { MiddlewareHandler } from "hono";
 import type { Config } from "./config.js";
-import { AppError } from "./error.js";
+import { AppError, emptyBody } from "./error.js";
 import { challenge, endpointLabel, type Metrics } from "./metrics.js";
 import * as mpp from "./mpp.js";
 import type { RestrictedAddressScreener } from "./screener.js";
@@ -115,7 +115,7 @@ export async function cold402(
       headers.set(entry[0], entry[1]);
     }
   }
-  return new Response(null, { status: 402, headers });
+  return emptyBody(402, headers);
 }
 
 /** Collision `400`: both rails presented at once. Reuses the error envelope. */

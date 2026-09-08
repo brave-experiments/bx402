@@ -689,4 +689,37 @@ describe("app", () => {
       restoreNetwork();
     }
   });
+
+  it("empty_responses_state_a_zero_length", async () => {
+    interface FramingCase {
+      /** Label printed if the assertion fails. */
+      name: string;
+      /** The path to request. */
+      path: string;
+      /** How to request it. */
+      init: RequestInit;
+      /** The status the answer carries. */
+      expected: number;
+    }
+    const cases: FramingCase[] = [
+      { name: "health", path: "/health", init: {}, expected: 200 },
+      { name: "cold 402", path: "/res/v1/web/search?q=rust", init: {}, expected: 402 },
+      { name: "unsold path", path: "/res/v1/chat/completions", init: {}, expected: 404 },
+      {
+        name: "unsupported method",
+        path: "/res/v1/web/search",
+        init: { method: "POST" },
+        expected: 405,
+      },
+    ];
+
+    const hono = await buildApp(testConfig(), undefined, new Metrics());
+    for (const { name, path, init, expected } of cases) {
+      const response = await hono.request(path, init);
+      expect(response.status, `case: ${name}`).toBe(expected);
+      // Stated rather than left to chunked encoding, which would tell a client a
+      // body may still be coming.
+      expect(response.headers.get("content-length"), `case: ${name}`).toBe("0");
+    }
+  });
 });

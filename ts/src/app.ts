@@ -3,7 +3,7 @@ import type { Dispatcher } from "undici";
 import type { Config } from "./config.js";
 import { context, dispatch } from "./dispatch.js";
 import { ENDPOINTS } from "./endpoints.js";
-import { AppError } from "./error.js";
+import { AppError, emptyBody } from "./error.js";
 import { endpointLabel, type Metrics, measure } from "./metrics.js";
 import type { RestrictedAddressScreener } from "./screener.js";
 import { search, searchClient } from "./search.js";
@@ -47,7 +47,7 @@ export async function app(
   hono.use(measure(metrics));
 
   // Liveness probe: 200 with an empty body while the server is up.
-  hono.on(ALLOWED_METHODS, HEALTH_PATH, (c) => c.body(null, 200));
+  hono.on(ALLOWED_METHODS, HEALTH_PATH, () => emptyBody(200));
 
   for (const endpoint of ENDPOINTS) {
     // The dispatch gate runs only for the methods the route serves, so an
@@ -65,7 +65,7 @@ export async function app(
   }
 
   // An unlisted path is a 404 with an empty body, never a payable route.
-  hono.notFound(() => new Response(null, { status: 404 }));
+  hono.notFound(() => emptyBody(404));
 
   return hono;
 }
@@ -130,8 +130,5 @@ export function rawQuery(url: string): string {
 
 /** The router's answer to a method a served path does not offer. */
 function methodNotAllowed(): Response {
-  return new Response(null, {
-    status: 405,
-    headers: { allow: ALLOWED_METHODS.join(",") },
-  });
+  return emptyBody(405, { allow: ALLOWED_METHODS.join(",") });
 }
