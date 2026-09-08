@@ -1,0 +1,7 @@
+# mppx pins ox at 0.14.33 and viem pins it at 0.14.44, so a plain install brings
+# in two copies. Both decode Tempo transactions, and the MPP rail recovers the
+# payer address with one decoder while the SDK verifies with the other. Two
+# versions could disagree, so hold the tree at a single ox. deny.toml enforces
+# the same single-version rule for tempo-primitives on the Rust side.
+overrides:
+  ox: 0.14.44
