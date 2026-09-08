@@ -4,7 +4,7 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-npm install --no-save --silent mppx viem
+npm install --no-save --no-audit --no-fund --loglevel=error mppx viem
 npm_client_version mppx
 
 payer_setup

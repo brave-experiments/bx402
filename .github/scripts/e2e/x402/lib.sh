@@ -32,7 +32,7 @@ rpc() {
 payer_setup() {
   # A second --no-save install into the same node_modules prunes the first's tree.
   node -e 'require.resolve("viem/accounts")' 2> /dev/null \
-    || npm install --no-save --silent viem
+    || npm install --no-save --no-audit --no-fund --loglevel=error viem
   PAYER_KEY="${X402_PAYER_PRIVATE_KEY:?set X402_PAYER_PRIVATE_KEY to the funded payer key}"
   PAYER_ADDR=$(PAYER_KEY="$PAYER_KEY" node -e \
     'console.log(require("viem/accounts").privateKeyToAccount(process.env.PAYER_KEY).address)')

@@ -35,12 +35,18 @@ jobs:
       - name: Pay for a search
         env:
           X402_PAYER_PRIVATE_KEY: ${{ secrets.X402_PAYER_PRIVATE_KEY }}
-        run: bash .github/scripts/e2e/x402/${{ matrix.client }}.sh
+        # Run outside the checkout. The client installs its own packages with
+        # npm, and npm cannot reconcile the tree pnpm lays out for the service:
+        # it walks into node_modules/.pnpm and dies on a peer conflict there.
+        run: |
+          mkdir -p "$RUNNER_TEMP/client"
+          cd "$RUNNER_TEMP/client"
+          bash "$GITHUB_WORKSPACE/.github/scripts/e2e/x402/${{ matrix.client }}.sh"
       - name: Show logs
         if: failure()
         run: |
           cat server.log || true
-          cat client.log || true
+          cat "$RUNNER_TEMP/client/client.log" || true
           # The body the client saw, which is the only place a rejected payment
           # or a non-200 from Brave Search shows up.
-          cat response.txt || true
+          cat "$RUNNER_TEMP/client/response.txt" || true

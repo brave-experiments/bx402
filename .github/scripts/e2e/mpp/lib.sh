@@ -22,7 +22,7 @@ new_payer() {
   # The guard is load-bearing: a second --no-save install into the same
   # node_modules prunes the first one's dependency tree.
   node -e 'require.resolve("viem/accounts")' 2> /dev/null \
-    || npm install --no-save --silent viem
+    || npm install --no-save --no-audit --no-fund --loglevel=error viem
   PAYER_KEY="0x$(openssl rand -hex 32)"
   PAYER_ADDR=$(PAYER_KEY="$PAYER_KEY" node -e \
     'console.log(require("viem/accounts").privateKeyToAccount(process.env.PAYER_KEY).address)')

@@ -4,7 +4,7 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-npm install --no-save --silent @x402/fetch @x402/evm viem
+npm install --no-save --no-audit --no-fund --loglevel=error @x402/fetch @x402/evm viem
 npm_client_version @x402/fetch
 
 payer_setup

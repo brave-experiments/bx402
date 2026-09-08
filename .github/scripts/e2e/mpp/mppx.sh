@@ -11,7 +11,7 @@ set -euo pipefail
 # Installed into the working directory. Deliberately unpinned: this e2e exists
 # to prove interop with the client users actually install today, so the version
 # floats and is printed for every run's forensics.
-npm install --no-save --silent mppx
+npm install --no-save --no-audit --no-fund --loglevel=error mppx
 MPPX_VERSION=$(./node_modules/.bin/mppx --version)
 echo "mppx version: $MPPX_VERSION"
 
