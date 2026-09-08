@@ -1,11 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   absoluteUri,
   absoluteUriFrom,
   classify,
+  cold402,
+  context,
   type Rail,
   type UriParts,
 } from "../src/dispatch.js";
+import { Metrics } from "../src/metrics.js";
+import {
+  decodeChallenge,
+  mockTempoRpc,
+  restoreNetwork,
+  TEST_CHAIN_ID,
+  testConfig,
+} from "./support.js";
 
 interface ClassifyCase {
   /** Label printed if the assertion fails. */
@@ -34,6 +44,16 @@ function partsOf(uri: string, headers: [string, string][]): UriParts {
     uriAuthority: undefined,
   };
 }
+
+/** The paid path every cold 402 test challenges for. */
+const WEB_SEARCH_PATH = "/res/v1/web/search";
+
+/** The absolute request URL a cold 402 names as its resource. */
+const RESOURCE = "https://bx402.example.com/res/v1/web/search?q=rust";
+
+afterEach(() => {
+  restoreNetwork();
+});
 
 describe("dispatch", () => {
   it("classify_by_payment_headers", () => {
@@ -172,5 +192,45 @@ describe("dispatch", () => {
       headers: { host: "API.bx402.io:443", "x-forwarded-proto": "https" },
     });
     expect(absoluteUri(request)).toBe("https://api.bx402.io/res/v1/web/search?q=a+b");
+  });
+
+  it("cold_402_advertises_both_rails", async () => {
+    mockTempoRpc(TEST_CHAIN_ID);
+    const ctx = await context(testConfig(), undefined, new Metrics());
+    const response = await cold402(
+      ctx,
+      "https://bx402.example.com/res/v1/web/search?q=rust",
+      "GET",
+      WEB_SEARCH_PATH,
+    );
+
+    expect(response.status).toBe(402);
+    // MPP states its challenge in the `Payment` scheme of `WWW-Authenticate`.
+    expect(response.headers.get("www-authenticate")?.startsWith("Payment ")).toBe(true);
+    // x402 states its own in the base64 `Payment-Required` envelope.
+    const requirements = decodeChallenge(response.headers.get("payment-required") as string);
+    expect(requirements.x402Version).toBe(2);
+    expect(Array.isArray(requirements.accepts)).toBe(true);
+    // The route binding mppx needs before it will sign.
+    const extensions = requirements.extensions as { mppx: { info: unknown } };
+    expect(typeof extensions.mppx.info).toBe("object");
+    // V2 clients read the headers, so the body stays empty.
+    expect(await response.text()).toBe("");
+  });
+
+  it("cold_402_advertises_only_the_enabled_rail", async () => {
+    // x402 alone, with nothing standing in for a Tempo endpoint, which also
+    // proves a disabled MPP rail never queries a chain.
+    const x402Only = await context(testConfig({ mpp: undefined }), undefined, new Metrics());
+    const first = await cold402(x402Only, RESOURCE, "GET", WEB_SEARCH_PATH);
+    expect(first.headers.get("payment-required")).not.toBeNull();
+    expect(first.headers.get("www-authenticate")).toBeNull();
+
+    // MPP alone: the inverse.
+    mockTempoRpc(TEST_CHAIN_ID);
+    const mppOnly = await context(testConfig({ x402: undefined }), undefined, new Metrics());
+    const second = await cold402(mppOnly, RESOURCE, "GET", WEB_SEARCH_PATH);
+    expect(second.headers.get("payment-required")).toBeNull();
+    expect(second.headers.get("www-authenticate")).not.toBeNull();
   });
 });

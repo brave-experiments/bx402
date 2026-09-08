@@ -1,6 +1,7 @@
+import { Challenge } from "mppx";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Config, MppConfig } from "../src/config.js";
-import { client } from "../src/mpp.js";
+import { challenge, client } from "../src/mpp.js";
 import { mockTempoRpc, restoreNetwork, testConfig } from "./support.js";
 
 /** Tempo mainnet and the Moderato testnet, the two chains this rail serves. */
@@ -47,6 +48,35 @@ describe("mpp", () => {
     await expect(clientOn(config, MODERATO)).rejects.toThrow("ALLOW_TESTNET");
     // Mainnet needs no flag.
     await expect(clientOn(config, MAINNET)).resolves.toBeDefined();
+  });
+
+  it("challenge_advertises_the_charge_credentials_answer", async () => {
+    const built = await clientOn(testConfig(), MODERATO);
+    const advertised = await challenge(built, WEB_SEARCH_PATH);
+    expect(advertised?.[0]).toBe("www-authenticate");
+
+    const parsed = Challenge.deserialize(advertised?.[1] as string);
+    expect(parsed.realm).toBe("bx402");
+    expect(parsed.method).toBe("tempo");
+    expect(parsed.intent).toBe("charge");
+    // Signed and time-boxed, so only a credential answering this challenge pays.
+    expect(parsed.id).not.toBe("");
+    expect(parsed.expires).toBeDefined();
+
+    // The charge a credential is verified against, byte for byte. `amount` is in
+    // base units here while the charge table holds the decimal the SDK scales
+    // from, so this is what pins the price that actually reaches a payer.
+    expect(parsed.request).toEqual({
+      amount: "5000",
+      currency: "0x20c0000000000000000000000000000000000000",
+      methodDetails: { chainId: MODERATO },
+      recipient: "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d",
+    });
+  });
+
+  it("challenge_needs_a_charge_for_the_path", async () => {
+    const built = await clientOn(testConfig(), MODERATO);
+    expect(await challenge(built, "/res/v1/chat/completions")).toBeUndefined();
   });
 
   it("each_endpoint_is_charged_at_its_own_price", async () => {

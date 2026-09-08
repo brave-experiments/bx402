@@ -6,6 +6,7 @@
  * classifies each request and delegates to whichever rail it is paying on.
  */
 
+import { Challenge } from "mppx";
 import { Mppx, tempo } from "mppx/server";
 import { request } from "undici";
 import type { Chain } from "viem";
@@ -15,12 +16,20 @@ import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 import type { MppConfig } from "./config.js";
 import { ENDPOINTS } from "./endpoints.js";
 import { AppError } from "./error.js";
+import { log } from "./log.js";
 
 /**
  * MPP carries its credential in the `Authorization` request header. Dispatch
  * keys on presence alone, so any value counts as an attempt on this rail.
  */
 const CREDENTIAL_HEADER = "authorization";
+
+/**
+ * MPP advertises its challenge in the `WWW-Authenticate` response header, the
+ * standard place a scheme states what it wants. The value carries the whole
+ * charge, so header-only clients read nothing else.
+ */
+const CHALLENGE_HEADER = "www-authenticate";
 
 /** What this rail calls itself in metrics. */
 export const RAIL = "mpp";
@@ -127,6 +136,34 @@ export async function client(rail: MppConfig, allowTestnet: boolean): Promise<Cl
     throw AppError.invalidConfig(`MPP: ${describe(err)}`);
   }
   return { handler, charges: charges(chainId) };
+}
+
+/**
+ * MPP's part of the cold `402`: a fresh `WWW-Authenticate: Payment` challenge
+ * carrying the charge a credential must answer. `undefined` if it cannot be
+ * built, leaving the `402` advertising x402 alone.
+ *
+ * Minted per request rather than once at startup, because every challenge is
+ * signed under the rail's secret and expires.
+ */
+export async function challenge(
+  client: Client,
+  path: string,
+): Promise<[string, string] | undefined> {
+  // Advertise this endpoint's charge and no other. A client that is offered
+  // every price at once could pay the cheapest and call the dearest.
+  const charge = client.charges.get(path);
+  if (charge === undefined) {
+    log.error(`no mpp charge for a paid path: ${path}`);
+    return undefined;
+  }
+  try {
+    const minted = await client.handler.challenge.tempo.charge(charge);
+    return [CHALLENGE_HEADER, Challenge.serialize(minted)];
+  } catch {
+    log.error("mpp challenge could not be built");
+    return undefined;
+  }
 }
 
 /**

@@ -99,10 +99,16 @@ export async function context(
  * A rail that cannot produce its challenge is left out, so the `402` still
  * advertises whatever the other rail offers.
  */
-export function cold402(ctx: Context, resource: string, method: string): Response {
+export async function cold402(
+  ctx: Context,
+  resource: string,
+  method: string,
+  path: string,
+): Promise<Response> {
   const headers = new Headers();
   const challenges = [
     ctx.x402 === undefined ? undefined : x402.challenge(ctx.x402, resource, method),
+    ctx.mpp === undefined ? undefined : await mpp.challenge(ctx.mpp, path),
   ];
   for (const entry of challenges) {
     if (entry !== undefined) {
@@ -154,7 +160,7 @@ export function dispatch(ctx: Context): MiddlewareHandler {
     // Nothing here can pay: no proof, or proof on a rail the deployment disables.
     const reason = rail === "none" ? challenge.NO_PAYMENT : challenge.RAIL_DISABLED;
     ctx.metrics.recordChallenge(endpoint, reason);
-    c.res = cold402(ctx, absoluteUri(c.req.raw), c.req.method);
+    c.res = await cold402(ctx, absoluteUri(c.req.raw), c.req.method, url.pathname);
   };
 }
 
