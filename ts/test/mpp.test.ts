@@ -1,4 +1,4 @@
-import { Challenge, Credential } from "mppx";
+import { Challenge, Credential, Receipt } from "mppx";
 import { HttpRequestError } from "viem";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Config, MppConfig } from "../src/config.js";
@@ -283,5 +283,73 @@ describe("mpp", () => {
       `bx402_payments_total{rail="mpp",endpoint="${WEB_SEARCH_PATH}",outcome="refused"} 1`,
     );
     await assertNotRecorded(metrics, 'outcome="network_unavailable"');
+  });
+
+  it("attached_receipt_parses_back_from_the_header", async () => {
+    // The money has already moved by the time the search runs, so the receipt
+    // rides back on whatever the search returned.
+    const settled = Receipt.from({
+      method: "tempo",
+      reference: "0xtxhash",
+      status: "success",
+      timestamp: new Date().toISOString(),
+    });
+    const built = await clientOn(testConfig(), MODERATO);
+    const charged: Client = {
+      ...built,
+      handler: {
+        ...built.handler,
+        broadcastCredential: () => Promise.resolve(settled),
+      } as Client["handler"],
+    };
+
+    const response = await handle(
+      charged,
+      undefined,
+      new Metrics(),
+      WEB_SEARCH_PATH,
+      await payingHeaders(),
+      () => Promise.resolve(new Response("upstream body", { status: 200 })),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("upstream body");
+    const parsed = Receipt.deserialize(response.headers.get("payment-receipt") as string);
+    expect(parsed.status).toBe("success");
+    expect(parsed.reference).toBe("0xtxhash");
+  });
+
+  it("a_settled_charge_is_recorded_at_the_catalog_price", async () => {
+    const metrics = new Metrics();
+    const built = await clientOn(testConfig(), MODERATO);
+    const charged: Client = {
+      ...built,
+      handler: {
+        ...built.handler,
+        broadcastCredential: () =>
+          Promise.resolve(
+            Receipt.from({
+              method: "tempo",
+              reference: "0xtxhash",
+              status: "success",
+              timestamp: new Date().toISOString(),
+            }),
+          ),
+      } as Client["handler"],
+    };
+
+    await handle(charged, undefined, metrics, WEB_SEARCH_PATH, await payingHeaders(), () =>
+      Promise.resolve(new Response(null, { status: 200 })),
+    );
+
+    await assertRecorded(
+      metrics,
+      `bx402_payments_total{rail="mpp",endpoint="${WEB_SEARCH_PATH}",outcome="settled"} 1`,
+    );
+    // What we count as earned is what we advertised, never anything the payer said.
+    await assertRecorded(
+      metrics,
+      `bx402_charged_base_units_total{rail="mpp",endpoint="${WEB_SEARCH_PATH}"} 5000`,
+    );
   });
 });

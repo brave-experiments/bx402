@@ -635,4 +635,58 @@ describe("app", () => {
     });
     expect(collision.status).toBe(400);
   });
+
+  it("a_blocked_mpp_signer_records_a_screened_out_payment", async () => {
+    const metrics = new Metrics();
+    const { header, signer } = await signedTransactionCredentialHeader();
+    const response = await (
+      await buildApp(testConfig(), screenerBlocking(signer, metrics), metrics, mockUpstream())
+    ).request("/res/v1/web/search?q=rust", { headers: { authorization: header } });
+
+    expect(response.status).toBe(402);
+    await assertPaymentOutcome(metrics, "mpp", "screened_out");
+    // Refused before the charge, so nothing was attempted on chain.
+    await assertNotRecorded(metrics, 'step="charge"');
+  });
+
+  it("dispatch_routes_by_payment_headers", async () => {
+    interface RouteCase {
+      /** Label printed if the assertion fails. */
+      name: string;
+      /** The payment headers to send. */
+      headers: Record<string, string>;
+      /** The status the request should end with. */
+      expected: number;
+    }
+    const cases: RouteCase[] = [
+      { name: "no payment: cold challenge", headers: {}, expected: 402 },
+      {
+        name: "x402 rejected: the facilitator says no",
+        headers: { "payment-signature": paymentSignature("/res/v1/web/search") },
+        expected: 402,
+      },
+      {
+        name: "mpp rejected: malformed credential",
+        headers: { authorization: "Payment test-cred" },
+        expected: 402,
+      },
+      {
+        name: "both rails at once: a collision",
+        headers: {
+          "payment-signature": paymentSignature("/res/v1/web/search"),
+          authorization: "Payment test-cred",
+        },
+        expected: 400,
+      },
+    ];
+
+    for (const { name, headers, expected } of cases) {
+      mockFacilitator(false, false);
+      const response = await (
+        await buildApp(testConfig(), undefined, new Metrics(), mockUpstream())
+      ).request("/res/v1/web/search?q=rust", { headers });
+      expect(response.status, `case: ${name}`).toBe(expected);
+      restoreNetwork();
+    }
+  });
 });
