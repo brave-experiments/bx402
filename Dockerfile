@@ -24,7 +24,10 @@ WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # Only what the service runs on; the compiler and the test tools stay behind.
-RUN pnpm install --frozen-lockfile --prod
+# The store is dropped in the same layer, or its copy of every package ships
+# too. node_modules hardlinks into it, so the files themselves survive.
+RUN pnpm install --frozen-lockfile --prod \
+    && rm -rf "$(pnpm store path)" ~/.cache/node/corepack
 COPY --from=builder /app/dist ./dist
 
 # Expose the traffic port and the metrics port. Only the first should ever be
