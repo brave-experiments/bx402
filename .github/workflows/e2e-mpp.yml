@@ -16,33 +16,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
   MPP_RPC_URL: https://rpc.moderato.tempo.xyz
 
 jobs:
-  build:
-    name: build bx402
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Show toolchain
-        run: rustup show
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: build
-      - name: Build
-        run: cargo build --locked
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: bx402-debug
-          path: target/debug/bx402
-          retention-days: 1
-
   paid-search:
     name: ${{ matrix.client }} pays on Moderato
-    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:

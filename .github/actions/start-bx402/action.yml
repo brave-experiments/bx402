@@ -1,5 +1,5 @@
 name: start bx402
-description: Download the built bx402 artifact and start it for an e2e run.
+description: Build the service and start it for an e2e run.
 
 inputs:
   brave-search-api-key:
@@ -21,9 +21,21 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
-        name: bx402-debug
+        node-version: 24
+    - name: Enable pnpm
+      shell: bash
+      # The version comes from the packageManager field in package.json.
+      run: corepack enable
+    - name: Install
+      shell: bash
+      run: pnpm install --frozen-lockfile
+    - name: Build
+      shell: bash
+      # Compiled here rather than shared as an artifact: the build is seconds,
+      # and the service needs its dependencies installed beside it anyway.
+      run: pnpm build
     - name: Start bx402
       shell: bash
       env:
@@ -32,13 +44,13 @@ runs:
         ENABLED_RAILS: ${{ inputs.enabled-rails }}
         ALLOW_TESTNET: "true"
       run: |
-        chmod +x bx402
         # An empty input means "not provided": the server must see the variable
         # as unset, not as an empty string (an empty ENABLED_RAILS is a startup
         # error by design).
         if [ -z "$ENABLED_RAILS" ]; then unset ENABLED_RAILS; fi
         if [ -z "$X402_FACILITATOR_URL" ]; then unset X402_FACILITATOR_URL; fi
-        MPP_SECRET_KEY=$(openssl rand -hex 32) ./bx402 > server.log 2>&1 &
+        # The MPP SDK refuses a secret under 32 bytes, which this clears.
+        MPP_SECRET_KEY=$(openssl rand -hex 32) node ts/dist/main.js > server.log 2>&1 &
         for _ in $(seq 1 30); do
           curl -sf -o /dev/null http://localhost:8080/health && exit 0
           sleep 1
