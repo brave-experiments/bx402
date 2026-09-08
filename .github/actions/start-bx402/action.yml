@@ -50,7 +50,7 @@ runs:
         if [ -z "$ENABLED_RAILS" ]; then unset ENABLED_RAILS; fi
         if [ -z "$X402_FACILITATOR_URL" ]; then unset X402_FACILITATOR_URL; fi
         # The MPP SDK refuses a secret under 32 bytes, which this clears.
-        MPP_SECRET_KEY=$(openssl rand -hex 32) node ts/dist/main.js > server.log 2>&1 &
+        MPP_SECRET_KEY=$(openssl rand -hex 32) node dist/main.js > server.log 2>&1 &
         for _ in $(seq 1 30); do
           curl -sf -o /dev/null http://localhost:8080/health && exit 0
           sleep 1

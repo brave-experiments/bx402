@@ -3,11 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
-/** The repository root, two levels up from this file. */
-const ROOT = join(import.meta.dirname, "..", "..");
+/** The repository root, one level up from this file. */
+const ROOT = join(import.meta.dirname, "..");
 
 /** The built entrypoint these tests run, the same one the container starts. */
-const ENTRYPOINT = join(ROOT, "ts", "dist", "main.js");
+const ENTRYPOINT = join(ROOT, "dist", "main.js");
 
 /**
  * Start the service with `env` and hand back what it printed and how it exited.
