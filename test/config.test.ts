@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type EnabledRails, parseEnabledRails } from "../src/config.js";
+import { configFromEnv, type EnabledRails, parseEnabledRails } from "../src/config.js";
 
 interface Case {
   /** Label printed if the assertion fails. */
@@ -48,5 +48,37 @@ describe("config", () => {
       const message = (thrown as Error).message;
       expect(message, `case: ${name}, error was: ${message}`).toContain("ENABLED_RAILS");
     }
+  });
+
+  it("cdp_credentials_are_read_together_or_not_at_all", () => {
+    const base = {
+      BRAVE_SEARCH_API_KEY: "secret-key",
+      X402_FACILITATOR_URL: "https://x402.org/facilitator",
+      ENABLED_RAILS: "x402",
+    };
+
+    // Unset, and set but empty, both mean uncredentialed.
+    expect(configFromEnv({ ...base }).x402?.cdp).toBeUndefined();
+    expect(
+      configFromEnv({ ...base, CDP_API_KEY_ID: "", CDP_API_KEY_SECRET: "" }).x402?.cdp,
+    ).toBeUndefined();
+
+    // Set together, the pair is carried as one value.
+    expect(
+      configFromEnv({ ...base, CDP_API_KEY_ID: "key-id", CDP_API_KEY_SECRET: "key-secret" }).x402
+        ?.cdp,
+    ).toEqual({ apiKeyId: "key-id", apiKeySecret: "key-secret" });
+
+    // One half alone is a misconfiguration, not a partial credential.
+    for (const partial of [{ CDP_API_KEY_ID: "key-id" }, { CDP_API_KEY_SECRET: "key-secret" }]) {
+      expect(() => configFromEnv({ ...base, ...partial })).toThrow(
+        /CDP_API_KEY_ID and CDP_API_KEY_SECRET/,
+      );
+    }
+
+    // A disabled rail reads none of its variables, half-set credentials included.
+    expect(
+      configFromEnv({ ...base, ENABLED_RAILS: "none", CDP_API_KEY_ID: "key-id" }).x402,
+    ).toBeUndefined();
   });
 });

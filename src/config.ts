@@ -60,6 +60,22 @@ export interface X402Config {
    * Docs: https://docs.x402.org/core-concepts/facilitator
    */
   facilitatorUrl: string;
+  /**
+   * API key for the Coinbase-hosted facilitator, absent for facilitators that
+   * take no credentials. Requests carry a signed token only when this is set.
+   */
+  cdp: CdpCredentials | undefined;
+}
+
+/**
+ * A CDP API key. The two halves only work as a pair, so configuration carries
+ * them as one value that is present or absent as a whole.
+ */
+export interface CdpCredentials {
+  /** The key's identifier, named in every signed token. */
+  apiKeyId: string;
+  /** The key's signing secret. */
+  apiKeySecret: string;
 }
 
 /** Settings for the MPP rail. */
@@ -111,6 +127,9 @@ export interface Config {
  *   rail's variables are not read.
  * - `X402_FACILITATOR_URL` (required when the x402 rail is enabled): base URL of
  *   the x402 facilitator.
+ * - `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET` (optional, read only when the x402
+ *   rail is enabled): API key for the Coinbase-hosted facilitator, set together
+ *   or not at all. Unset or empty leaves facilitator requests uncredentialed.
  * - `MPP_RPC_URL` (required when the MPP rail is enabled): Tempo RPC endpoint.
  * - `MPP_SECRET_KEY` (required when the MPP rail is enabled): HMAC secret binding
  *   MPP challenges to this service.
@@ -131,20 +150,42 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): Config {
     env.ENABLED_RAILS === undefined
       ? { x402: true, mpp: true }
       : parseEnabledRails(env.ENABLED_RAILS);
-  const bucket = env.RESTRICTED_ADDRESS_S3_BUCKET;
   return {
     braveSearchApiKey,
     braveSearchApiBaseUrl,
-    x402: rails.x402 ? { facilitatorUrl: requireVar(env, "X402_FACILITATOR_URL") } : undefined,
+    x402: rails.x402 ? x402FromEnv(env) : undefined,
     mpp: rails.mpp
       ? {
           rpcUrl: requireVar(env, "MPP_RPC_URL"),
           secretKey: requireVar(env, "MPP_SECRET_KEY"),
         }
       : undefined,
-    restrictedAddressS3Bucket: bucket === undefined || bucket === "" ? undefined : bucket,
+    restrictedAddressS3Bucket: optionalVar(env, "RESTRICTED_ADDRESS_S3_BUCKET"),
     allowTestnet: env.ALLOW_TESTNET === "true",
   };
+}
+
+/**
+ * Read the x402 rail's settings. The CDP key halves are useless alone, so one
+ * without the other is a misconfiguration, not a partial credential.
+ */
+function x402FromEnv(env: NodeJS.ProcessEnv): X402Config {
+  const apiKeyId = optionalVar(env, "CDP_API_KEY_ID");
+  const apiKeySecret = optionalVar(env, "CDP_API_KEY_SECRET");
+  if ((apiKeyId === undefined) !== (apiKeySecret === undefined)) {
+    throw AppError.invalidConfig("CDP_API_KEY_ID and CDP_API_KEY_SECRET must be set together");
+  }
+  return {
+    facilitatorUrl: requireVar(env, "X402_FACILITATOR_URL"),
+    cdp:
+      apiKeyId === undefined || apiKeySecret === undefined ? undefined : { apiKeyId, apiKeySecret },
+  };
+}
+
+/** Read an optional environment variable, treating unset and empty alike. */
+function optionalVar(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const value = env[name];
+  return value === undefined || value === "" ? undefined : value;
 }
 
 /** Read a required environment variable, or fail startup naming it. */

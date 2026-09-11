@@ -63,7 +63,7 @@ describe("x402", () => {
     // here instead of silently moving the charge.
     const config = testConfig();
     const built = client(
-      config.x402 ?? { facilitatorUrl: "http://facilitator.invalid" },
+      config.x402 ?? { facilitatorUrl: "http://facilitator.invalid", cdp: undefined },
       config.allowTestnet,
     );
     const entry = challenge(built, "https://bx402.example.com/res/v1/web/search?q=rust", "GET");
