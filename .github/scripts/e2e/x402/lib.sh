@@ -18,7 +18,7 @@ RPC="${BASE_SEPOLIA_RPC_URL:-https://sepolia.base.org}"
 URL="http://localhost:8080/res/v1/web/search?q=base+sepolia"
 USDC="0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 PRICE=5000
-# Mirrors PAY_TO_EVM in src/x402.rs.
+# Mirrors PAY_TO_EVM in src/x402.ts.
 TREASURY="0xbd9420A98a7Bd6B89765e5715e169481602D9c3d"
 # keccak("Transfer(address,address,uint256)"); both addresses are indexed, so the
 # amount is the log's data.

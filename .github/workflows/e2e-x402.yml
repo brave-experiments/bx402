@@ -30,7 +30,7 @@ jobs:
       - uses: ./.github/actions/start-bx402
         with:
           brave-search-api-key: ${{ secrets.BRAVE_SEARCH_API_KEY }}
-          x402-facilitator-url: https://facilitator.x402.rs
+          x402-facilitator-url: https://x402.org/facilitator
           enabled-rails: x402
       - name: Pay for a search
         env:
