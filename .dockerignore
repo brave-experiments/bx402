@@ -5,4 +5,3 @@ dist/
 .env.*
 .claude/
 compose.yaml
-facilitator/
