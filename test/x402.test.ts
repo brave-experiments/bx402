@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { generateKeyPairSync } from "node:crypto";
+import type { PaymentPayload } from "@x402/core/types";
+import { afterEach, describe, expect, it } from "vitest";
 import { accepts, challenge, client, decodePayment, PAYMENT_REQUIRED_HEADER } from "../src/x402.js";
-import { decodeChallenge, testConfig } from "./support.js";
+import { decodeChallenge, mockOrigin, restoreNetwork, testConfig } from "./support.js";
 
 /** The offers advertised for one paid path. */
 function offersFor(allowTestnet: boolean, path: string) {
@@ -18,7 +20,26 @@ function paymentHeaders(payload: unknown): Headers {
   });
 }
 
+/**
+ * A CDP API key secret that really signs: 64 base64 bytes of Ed25519 seed plus
+ * public key, the shape the CDP SDK detects and signs tokens with.
+ */
+function testCdpSecret(): string {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const jwk = privateKey.export({ format: "jwk" }) as { d?: string };
+  const pub = publicKey.export({ format: "jwk" }) as { x?: string };
+  return Buffer.concat([
+    Buffer.from(jwk.d ?? "", "base64url"),
+    Buffer.from(pub.x ?? "", "base64url"),
+  ]).toString("base64");
+}
+
+/** The base URL of the Coinbase-hosted facilitator. */
+const CDP_FACILITATOR_URL = "https://api.cdp.coinbase.com/platform/v2/x402";
+
 describe("x402", () => {
+  afterEach(restoreNetwork);
+
   it("without_the_testnet_flag_only_mainnet_is_offered", () => {
     const entries = offersFor(false, "/res/v1/web/search");
     expect(entries).toHaveLength(1);
@@ -56,6 +77,44 @@ describe("x402", () => {
     const decoded = decodePayment(paymentHeaders({ accepted: discounted }));
     expect(decoded).toBeDefined();
     expect(entries).not.toContainEqual(decoded?.accepted);
+  });
+
+  it("cdp_credentials_pair_only_with_the_cdp_facilitator", () => {
+    // A signed CDP token sent to any other host could be replayed against CDP
+    // while it lives, so that combination must never build.
+    const cdp = { apiKeyId: "key-id", apiKeySecret: "key-secret" };
+    expect(() => client({ facilitatorUrl: "https://x402.org/facilitator", cdp }, true)).toThrow(
+      /api\.cdp\.coinbase\.com/,
+    );
+    expect(client({ facilitatorUrl: CDP_FACILITATOR_URL, cdp }, true)).toBeDefined();
+  });
+
+  it("cdp_credentials_sign_the_verify_call", async () => {
+    const built = client(
+      {
+        facilitatorUrl: CDP_FACILITATOR_URL,
+        cdp: { apiKeyId: "key-id", apiKeySecret: testCdpSecret() },
+      },
+      true,
+    );
+
+    let authorization: string | null = null;
+    mockOrigin("https://api.cdp.coinbase.com")
+      .intercept({ method: "POST", path: "/platform/v2/x402/verify" })
+      .reply((request) => {
+        authorization = new Headers(request.headers as Record<string, string>).get("authorization");
+        return { statusCode: 200, data: { isValid: true } };
+      });
+
+    const offer = offersFor(true, "/res/v1/web/search")[0];
+    if (offer === undefined) {
+      throw new Error("the paid path offers nothing");
+    }
+    const result = await built.facilitator.verify({} as PaymentPayload, offer);
+    expect(result.isValid).toBe(true);
+    // The token itself is the CDP SDK's business; what is ours is that the
+    // request went out bearing one.
+    expect(authorization).toMatch(/^Bearer .+/);
   });
 
   it("challenge_emits_the_full_payment_required_payload", () => {

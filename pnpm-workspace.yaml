@@ -1,3 +1,6 @@
+# Its postinstall only prints a terms-of-service notice; nothing is built.
+allowBuilds:
+  '@coinbase/x402': false
 # mppx pins ox at 0.14.33 and viem pins it at 0.14.44, so a plain install brings
 # in two copies. Both decode Tempo transactions, and the MPP rail recovers the
 # payer address with one decoder while the SDK verifies with the other. Two
@@ -5,3 +8,7 @@
 # the same single-version rule for tempo-primitives on the Rust side.
 overrides:
   ox: 0.14.44
+  # The CDP SDK pins axios at 1.16.0 exactly, which pnpm audit flags
+  # (GHSA advisories fixed in 1.18.0). Only its API client uses axios; the JWT
+  # signing this service imports never touches it.
+  axios: 1.20.0

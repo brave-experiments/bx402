@@ -6,6 +6,8 @@
  */
 
 import { isDeepStrictEqual } from "node:util";
+import { createCdpAuthHeaders } from "@coinbase/x402";
+import type { FacilitatorConfig } from "@x402/core/http";
 import { encodePaymentRequiredHeader, encodePaymentResponseHeader } from "@x402/core/http";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
@@ -144,21 +146,44 @@ export interface Client {
 }
 
 /**
+ * The host CDP credentials sign for. The signed tokens name this host and the
+ * CDP verify and settle paths, so they authenticate nowhere else.
+ */
+const CDP_FACILITATOR_HOST = "api.cdp.coinbase.com";
+
+/**
  * Build the x402 facilitator client from the rail's settings. A bad
  * `X402_FACILITATOR_URL` is a startup misconfiguration.
  */
 export function client(rail: X402Config, allowTestnet: boolean): Client {
+  let url: URL;
   try {
     // Parsed only to reject a URL we could never call; the string is passed on
     // as configured, so the facilitator sees exactly the base it was given.
-    new URL(rail.facilitatorUrl);
+    url = new URL(rail.facilitatorUrl);
   } catch (err: unknown) {
     throw AppError.invalidConfig(
       `X402_FACILITATOR_URL: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+  // A signed CDP token sent elsewhere would let that host replay it against CDP
+  // for the token's lifetime, so credentials pair only with the CDP host.
+  if (rail.cdp !== undefined && url.host !== CDP_FACILITATOR_HOST) {
+    throw AppError.invalidConfig(
+      `CDP_API_KEY_ID is set but X402_FACILITATOR_URL does not point at ${CDP_FACILITATOR_HOST}`,
+    );
+  }
+  const config: FacilitatorConfig = { url: rail.facilitatorUrl };
+  if (rail.cdp !== undefined) {
+    // The SDK types the hook as optional but always builds one; the guard only
+    // satisfies the type checker.
+    const createAuthHeaders = createCdpAuthHeaders(rail.cdp.apiKeyId, rail.cdp.apiKeySecret);
+    if (createAuthHeaders !== undefined) {
+      config.createAuthHeaders = createAuthHeaders;
+    }
+  }
   return {
-    facilitator: new HTTPFacilitatorClient({ url: rail.facilitatorUrl }),
+    facilitator: new HTTPFacilitatorClient(config),
     accepts: accepts(allowTestnet),
   };
 }

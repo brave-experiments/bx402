@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1127.0",
+    "@coinbase/x402": "2.1.0",
     "@hono/node-server": "^2.1.1",
     "@prometheus-io/client": "^0.16.1",
     "@smithy/node-http-handler": "^4.12.1",

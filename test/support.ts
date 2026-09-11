@@ -4,7 +4,13 @@ import type { Hono } from "hono";
 import { Challenge, Credential } from "mppx";
 import * as Secp256k1 from "ox/Secp256k1";
 import { TxEnvelopeTempo } from "ox/tempo";
-import { type Dispatcher, getGlobalDispatcher, MockAgent, setGlobalDispatcher } from "undici";
+import {
+  type Dispatcher,
+  getGlobalDispatcher,
+  type Interceptable,
+  MockAgent,
+  setGlobalDispatcher,
+} from "undici";
 import { privateKeyToAccount } from "viem/accounts";
 import { expect } from "vitest";
 import { app } from "../src/app.js";
@@ -128,6 +134,14 @@ export function mockFacilitator(valid: boolean, settles: boolean): MockAgent {
     )
     .persist();
   return agent;
+}
+
+/**
+ * Stand in for `origin` on the shared mock network, for a test that stubs an
+ * endpoint the fixed helpers below do not cover. Call `restoreNetwork` afterwards.
+ */
+export function mockOrigin(origin: string): Interceptable {
+  return mockNetwork().get(origin);
 }
 
 /** The Tempo RPC endpoint the test config points at. */
