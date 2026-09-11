@@ -31,28 +31,30 @@ comes from the `packageManager` field), and a Brave Search API key (free tier at
 
 ## Paying for a search on Base Sepolia
 
-This runs `bx402` in Docker with a self-hosted
-[x402 facilitator](https://github.com/x402-rs/x402-rs) sidecar that settles the
-payment on chain.
+This runs `bx402` in Docker against the public
+[x402.org facilitator](https://docs.x402.org/dev-tools/facilitators), which verifies each
+payment and settles it on chain. It serves testnet only and pays the settlement gas
+itself, so nothing on the Brave side needs funding. Production points
+`X402_FACILITATOR_URL` at the
+[Coinbase-hosted facilitator](https://docs.cdp.coinbase.com/x402/seller/facilitator)
+instead, with `CDP_API_KEY_ID` and `CDP_API_KEY_SECRET` set beside it; the service
+signs every facilitator call with that key and refuses to send credentials to any
+other facilitator host.
 
-| Party              | Owner | Requires               | Faucet                                                  |
-| ------------------ | ----- | ---------------------- | ------------------------------------------------------- |
-| Facilitator signer | Brave | Base Sepolia ETH (gas) | [Alchemy](https://www.alchemy.com/faucets/base-sepolia) |
-| Payer wallet       | Agent | Base Sepolia USDC      | [Circle](https://faucet.circle.com/)                    |
-| Treasury address   | Brave | nothing                | —                                                       |
+| Party            | Owner | Requires          | Faucet                               |
+| ---------------- | ----- | ----------------- | ------------------------------------ |
+| Payer wallet     | Agent | Base Sepolia USDC | [Circle](https://faucet.circle.com/) |
+| Treasury address | Brave | nothing           | —                                    |
 
-1. Clone, then write your Brave Search API key and a throwaway facilitator key to `.env`:
+1. Clone, then write your Brave Search API key to `.env`:
    ```sh
    git clone git@github.com:brave-experiments/bx402.git
    cd bx402
    echo "BRAVE_SEARCH_API_KEY=<your-key>" >> .env
-   echo "X402_FACILITATOR_PRIVATE_KEY=0x$(openssl rand -hex 32)" >> .env
    ```
-2. Start the stack and note the signer address to fund with ETH on Base Sepolia:
+2. Start the stack:
    ```sh
    docker compose up --build -d
-   docker compose logs facilitator | grep signers
-   # Using EVM provider chain=eip155:84532 signers=[0xebd9…fb45]
    ```
 3. Create a payer wallet and fund it with USDC on Base Sepolia (`brew install stripe/purl/purl` if needed):
    ```sh
@@ -65,12 +67,12 @@ payment on chain.
    purl -v --max-amount 10000 'http://localhost:8080/res/v1/web/search?q=rust'
    ```
    The server returns the settled tx hash in the `PAYMENT-RESPONSE` response
-   header, but purl does not print it. Read it from the facilitator logs instead,
-   then look it up on [sepolia.basescan.org](https://sepolia.basescan.org).
+   header, but purl does not print it. Look the payer's USDC transfer up on
+   [sepolia.basescan.org](https://sepolia.basescan.org) instead.
 
 ## Paying for a search on Tempo Moderato
 
-No facilitator and no sidecar here: the server talks to a Tempo RPC endpoint directly, and
+No facilitator here: the server talks to a Tempo RPC endpoint directly, and
 verifying an MPP credential is what settles it. Only the payer needs funding.
 
 1. Write the config to `.env` and start the server (`ENABLED_RAILS=mpp` runs the MPP
