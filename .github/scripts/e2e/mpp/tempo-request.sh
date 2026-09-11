@@ -2,9 +2,10 @@
 # The tempo request leg of the MPP e2e: install the Tempo CLI, fund a
 # throwaway key, pay for one search, then prove the settlement.
 #
-# `tempo request` signs with TEMPO_PRIVATE_KEY and follows the server's
-# challenge for both chain and token, so the 42431 chain id routes it to
-# Moderato and pathUSD without any flags. Deliberately unpinned: the launcher
+# `tempo request` signs with TEMPO_PRIVATE_KEY and pays only on the network it
+# is told to use, which defaults to mainnet. It refuses a challenge for any
+# other chain, so --network tempo-moderato matches the 42431 offer and routes
+# it to Moderato and pathUSD. Deliberately unpinned: the launcher
 # chooses both its own version and the request extension's, and prints its
 # version for every run's forensics.
 set -euo pipefail
@@ -23,7 +24,7 @@ echo "tempo version: $TEMPO_VERSION"
 new_payer
 export TEMPO_PRIVATE_KEY="$PAYER_KEY"
 
-tempo request -i "$URL" > response.txt 2> client.log
+tempo request -i --network tempo-moderato "$URL" > response.txt 2> client.log
 assert_http_200 response.txt
 
 verify_settlement response.txt
