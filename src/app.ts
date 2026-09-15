@@ -53,13 +53,17 @@ export async function app(
   // The discovery document and the buyer's guide are served free, since they
   // are how a client learns what is for sale before paying. Registered
   // outside the endpoint loop, so dispatch never runs for them and neither
-  // path can turn payable. Both bodies are built once: nothing in either
-  // varies per request, and the rails the document reads are fixed at
+  // path can turn payable. Both bodies are built and encoded once: nothing in
+  // either varies per request, and the rails the document reads are fixed at
   // startup. The responses are built by hand rather than through `c.json()`,
   // which would append a charset to the content type.
   const served = [
-    { path: DISCOVERY_PATH, type: "application/json", body: JSON.stringify(document(ctx)) },
-    { path: GUIDE_PATH, type: "text/plain; charset=utf-8", body: guide() },
+    {
+      path: DISCOVERY_PATH,
+      type: "application/json",
+      body: Buffer.from(JSON.stringify(document(ctx))),
+    },
+    { path: GUIDE_PATH, type: "text/plain; charset=utf-8", body: Buffer.from(guide()) },
   ];
   for (const { path, type, body } of served) {
     hono.on(
@@ -86,8 +90,7 @@ export async function app(
   // not match. A path we do not serve falls through to the 404 below instead.
   for (const path of [
     HEALTH_PATH,
-    DISCOVERY_PATH,
-    GUIDE_PATH,
+    ...served.map((entry) => entry.path),
     ...ENDPOINTS.map((endpoint) => endpoint.path),
   ]) {
     hono.all(path, () => methodNotAllowed());

@@ -33,11 +33,6 @@ async function documentFor(
   return document(await context(config, undefined, new Metrics()));
 }
 
-/** Every offer the document states, across all paths. */
-function allOffers(doc: DiscoveryDocument) {
-  return Object.values(doc.paths).flatMap((path) => path.get["x-payment-info"]?.offers ?? []);
-}
-
 /** The offers stated for one path. */
 function offersOf(doc: DiscoveryDocument, path: string) {
   return doc.paths[path]?.get["x-payment-info"]?.offers ?? [];
@@ -71,7 +66,9 @@ describe("discovery", () => {
 
   it("every_offer_carries_only_the_fields_the_spec_defines", async () => {
     const doc = await documentFor();
-    const offers = allOffers(doc);
+    const offers = Object.values(doc.paths).flatMap(
+      (path) => path.get["x-payment-info"]?.offers ?? [],
+    );
     expect(offers.length).toBeGreaterThan(0);
     for (const offer of offers) {
       // The standing guard that the treasury address and the network id never
