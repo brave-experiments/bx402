@@ -240,26 +240,29 @@ function charges(chainId: number): Map<string, Charge> {
 }
 
 /**
- * The offer this rail states in the discovery document for `path`, read off
+ * The offers this rail states in the discovery document for `path`, read off
  * the `charges` table so discovery can never disagree with the challenge.
- * `undefined` for a path that is not sold.
+ * Empty for a path that is not sold, one offer otherwise, since the rail
+ * charges on a single chain in a single token.
  *
  * The charge states a decimal amount while a discovery offer states base
  * units, so the conversion runs back through `parseUnits` on the very charge
  * the challenge advertises rather than reading the catalog a second time.
  */
-export function offer(client: Client, path: string): Offer | undefined {
+export function offers(client: Client, path: string): Offer[] {
   const charge = client.charges.get(path);
   if (charge === undefined) {
-    return undefined;
+    return [];
   }
-  return {
-    intent: "charge",
-    method: TEMPO_METHOD,
-    amount: String(parseUnits(charge.amount, charge.decimals)),
-    currency: charge.currency,
-    description: describeOffer(charge),
-  };
+  return [
+    {
+      intent: "charge",
+      method: TEMPO_METHOD,
+      amount: String(parseUnits(charge.amount, charge.decimals)),
+      currency: charge.currency,
+      description: describeOffer(charge),
+    },
+  ];
 }
 
 /**

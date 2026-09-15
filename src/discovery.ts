@@ -117,10 +117,9 @@ export function document(ctx: Context): DiscoveryDocument {
  * inside its slice.
  */
 function operation(ctx: Context, endpoint: Endpoint): Operation {
-  const mppOffer = ctx.mpp === undefined ? undefined : mpp.offer(ctx.mpp, endpoint.path);
   const offers = [
     ...(ctx.x402 === undefined ? [] : x402.offers(ctx.x402, endpoint.path)),
-    ...(mppOffer === undefined ? [] : [mppOffer]),
+    ...(ctx.mpp === undefined ? [] : mpp.offers(ctx.mpp, endpoint.path)),
   ];
   const stated: Operation = {
     summary: endpoint.description,

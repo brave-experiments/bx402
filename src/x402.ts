@@ -44,8 +44,14 @@ export const PAYMENT_REQUIRED_HEADER = "payment-required";
 /** The EVM treasury address that receives x402 payments (`payTo`). */
 const PAY_TO_EVM = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
 
-/** What this rail calls itself, in metrics and in discovery offers. */
+/** What this rail calls itself in metrics. */
 export const RAIL = "x402";
+
+/**
+ * The payment method identifier discovery offers carry for this rail. Stated
+ * apart from the metrics name, so relabeling one can never move the other.
+ */
+const X402_METHOD = "x402";
 
 /**
  * The networks this rail sells on, in the order offers are advertised: the
@@ -255,7 +261,7 @@ function pathOf(resource: string): string {
 export function offers(client: Client, path: string): Offer[] {
   return (client.accepts.get(path) ?? []).map((entry) => ({
     intent: "charge",
-    method: RAIL,
+    method: X402_METHOD,
     amount: entry.amount,
     currency: entry.asset,
     description: describeOffer(entry),

@@ -9,7 +9,7 @@ import {
   client,
   credential,
   handle,
-  offer,
+  offers,
   signerAddress,
   transactionPayload,
 } from "../src/mpp.js";
@@ -135,27 +135,29 @@ describe("mpp", () => {
     await expect(clientOn(testConfig(), 1)).rejects.toThrow("unsupported Tempo chain 1");
   });
 
-  it("discovery_offer_restates_the_charge_in_base_units", async () => {
+  it("discovery_offers_restate_the_charge_in_base_units", async () => {
     const built = await clientOn(testConfig(), MODERATO);
     // The charge behind this offer reads "0.005"; the offer states base units.
-    expect(offer(built, WEB_SEARCH_PATH)).toEqual({
-      intent: "charge",
-      method: "tempo",
-      amount: "5000",
-      currency: "0x20c0000000000000000000000000000000000000",
-      description: "pathUSD on Tempo Testnet (Moderato)",
-    });
+    expect(offers(built, WEB_SEARCH_PATH)).toEqual([
+      {
+        intent: "charge",
+        method: "tempo",
+        amount: "5000",
+        currency: "0x20c0000000000000000000000000000000000000",
+        description: "pathUSD on Tempo Testnet (Moderato)",
+      },
+    ]);
   });
 
-  it("discovery_offer_names_the_chain_the_deployment_settles_on", async () => {
+  it("discovery_offers_name_the_chain_the_deployment_settles_on", async () => {
     // A moderato deployment must not read as mainnet, or the reverse.
     const built = await clientOn(testConfig(), MAINNET);
-    expect(offer(built, WEB_SEARCH_PATH)?.description).toBe("pathUSD on Tempo Mainnet");
+    expect(offers(built, WEB_SEARCH_PATH)[0]?.description).toBe("pathUSD on Tempo Mainnet");
   });
 
-  it("discovery_offer_is_undefined_for_a_path_that_is_not_sold", async () => {
+  it("discovery_offers_are_empty_for_a_path_that_is_not_sold", async () => {
     const built = await clientOn(testConfig(), MODERATO);
-    expect(offer(built, "/res/v1/answers/search")).toBeUndefined();
+    expect(offers(built, "/res/v1/answers/search")).toEqual([]);
   });
 
   it("only_a_signed_transaction_payload_pays", () => {
