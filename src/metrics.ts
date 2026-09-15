@@ -42,6 +42,9 @@ const OTHER = "other";
 /** Liveness probe path, repeated here so the label cannot drift from the route. */
 const HEALTH_PATH = "/health";
 
+/** Discovery document path, repeated here for the same reason. */
+const DISCOVERY_PATH = "/openapi.json";
+
 /** Why a request was answered with a challenge instead of served. */
 export const challenge = {
   /** The request carried no payment proof at all. */
@@ -267,6 +270,9 @@ export class Metrics {
 export function endpointLabel(path: string): string {
   if (path === HEALTH_PATH) {
     return HEALTH_PATH;
+  }
+  if (path === DISCOVERY_PATH) {
+    return DISCOVERY_PATH;
   }
   return find(path)?.path ?? OTHER;
 }

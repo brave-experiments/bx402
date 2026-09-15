@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Dispatcher } from "undici";
 import type { Config } from "./config.js";
+import { CACHE_CONTROL, DISCOVERY_PATH, document } from "./discovery.js";
 import { context, dispatch } from "./dispatch.js";
 import { ENDPOINTS } from "./endpoints.js";
 import { AppError, emptyBody } from "./error.js";
@@ -49,6 +50,23 @@ export async function app(
   // Liveness probe: 200 with an empty body while the server is up.
   hono.on(ALLOWED_METHODS, HEALTH_PATH, () => emptyBody(200));
 
+  // The discovery document is served free, since it is how a client learns
+  // what is for sale before paying. Registered outside the endpoint loop, so
+  // dispatch never runs for it and the path can never turn payable. Built and
+  // serialized once: nothing in it varies per request, and the rails it reads
+  // are fixed at startup. Built by hand rather than through `c.json()`, which
+  // would append a charset to the content type.
+  const discoveryBody = JSON.stringify(document(ctx));
+  hono.on(
+    ALLOWED_METHODS,
+    DISCOVERY_PATH,
+    (c) =>
+      // A HEAD carries the headers of the GET and none of the body.
+      new Response(c.req.method === "HEAD" ? null : discoveryBody, {
+        headers: { "content-type": "application/json", "cache-control": CACHE_CONTROL },
+      }),
+  );
+
   for (const endpoint of ENDPOINTS) {
     // The dispatch gate runs only for the methods the route serves, so an
     // unsupported method gets the plain 405 rather than a payable 402 whose
@@ -60,7 +78,7 @@ export async function app(
 
   // Registered after the served methods, so it answers only a method those did
   // not match. A path we do not serve falls through to the 404 below instead.
-  for (const path of [HEALTH_PATH, ...ENDPOINTS.map((endpoint) => endpoint.path)]) {
+  for (const path of [HEALTH_PATH, DISCOVERY_PATH, ...ENDPOINTS.map((endpoint) => endpoint.path)]) {
     hono.all(path, () => methodNotAllowed());
   }
 
