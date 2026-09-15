@@ -1,0 +1,175 @@
+# bx402
+
+> A pay-per-request proxy in front of the Brave Search API. Each request
+> carries a stablecoin micropayment, and the signed payment is the credential.
+> No API key, no account, no signup.
+
+This file is written for an agent that wants to buy a search. The paths and
+prices here are restated by the machine-readable document at
+`GET /openapi.json`. Both are advisory: the `402` response from a paid path is
+the authoritative statement of what that exact request costs.
+
+## Buy one search
+
+Both commands pay the testnet offer of a deployment that allows testnets.
+Replace the origin with the one you fetched this file from.
+
+x402 rail, USDC on Base Sepolia, with purl (https://github.com/stripe/purl):
+
+    purl --max-amount 10000 'https://bx402.example/res/v1/web/search?q=rust'
+
+MPP rail, pathUSD on Tempo Moderato, with mppx (https://www.npmjs.com/package/mppx):
+
+    npx mppx --network testnet -i 'https://bx402.example/res/v1/web/search?q=rust'
+
+On mainnet, drop `--network testnet` and fund the payer with real USDC on Base
+or pathUSD on Tempo.
+
+## What is for sale and what it costs
+
+Prices are in base units of a six decimal token, so 5000 is $0.005. Both rails
+charge the same price for the same path.
+
+| Path                         | Base units | Rate   |
+| ---------------------------- | ---------- | ------ |
+| `/res/v1/web/search`         | 5000       | $5/1k  |
+| `/res/v1/llm/context`        | 5000       | $5/1k  |
+| `/res/v1/news/search`        | 5000       | $5/1k  |
+| `/res/v1/videos/search`      | 5000       | $5/1k  |
+| `/res/v1/images/search`      | 5000       | $5/1k  |
+| `/res/v1/summarizer/search`  | 5000       | $5/1k  |
+| `/res/v1/local/place_search` | 5000       | $5/1k  |
+| `/res/v1/local/pois`         | 5000       | $5/1k  |
+| `/res/v1/local/descriptions` | 5000       | $5/1k  |
+| `/res/v1/suggest/search`     | 500        | $5/10k |
+| `/res/v1/spellcheck/search`  | 500        | $5/10k |
+
+A path outside this table is a `404`, never a payable `402`. The Answers API
+(`/res/v1/chat/completions`) is not sold: it bills per query and per token,
+which one fixed price cannot express.
+
+A payment is checked against the price of the path it is sent to. A credential
+bought for Autosuggest does not pay for a web search.
+
+Query parameters are forwarded to Brave unchanged. See the Brave Search API
+documentation (https://brave.com/search/api/) for what each path accepts.
+
+## Discovery
+
+`GET /openapi.json` serves an OpenAPI 3.1 document listing every paid path.
+Each operation carries an `x-payment-info` extension with the offers the
+deployment's rails advertise: `intent`, `method` (`x402` or `tempo`), `amount`
+in base units, `currency` as the token address, and a `description` naming the
+token and chain in words. The recipient is not in the document; it comes from
+the `402` challenge at pay time.
+
+The offers mirror the rails the deployment has enabled: a disabled rail's
+offers are absent, and a deployment with payments paused lists every path
+with its `402` declared and no offers at all.
+
+The document is cached for five minutes (`Cache-Control: public, max-age=300`)
+and is advisory. The `402` is authoritative.
+
+## The pay then retry loop
+
+1. Send the request with no payment header. The answer is a `402` with an
+   empty body: everything is in the response headers.
+2. Read the challenge. x402 is in `Payment-Required` (base64 JSON), MPP is in
+   `WWW-Authenticate` (the `Payment` scheme).
+3. Sign what the challenge asks.
+4. Retry the identical request with your rail's payment header.
+5. Read the receipt header on the response.
+
+The x402 challenge repeats the URL you requested, query string included, byte
+for byte. A client that rewrites the URL, by re-encoding the query for
+example, will refuse to sign or fail verification. Retry the exact request.
+
+Challenges expire: an x402 offer is payable for 300 seconds and an MPP
+challenge carries its own expiry. Fetch a fresh `402` rather than paying an
+old one.
+
+## The two rails
+
+The service supports both rails, but a deployment may run only one, or pause
+payments entirely. The `402` tells you which rails can take your payment
+right now: each enabled rail contributes its challenge header, and a disabled
+rail's header is simply absent. A payment sent on a rail that is not
+advertised is answered with that same `402`, so read the challenge headers
+before choosing how to pay.
+
+|                     | x402                          | MPP                                 |
+| ------------------- | ----------------------------- | ----------------------------------- |
+| Challenge (on 402)  | `Payment-Required`            | `WWW-Authenticate: Payment ...`     |
+| Payment (on retry)  | `Payment-Signature`           | `Authorization: Payment <credential>` |
+| Receipt (on result) | `Payment-Response`            | `Payment-Receipt`                   |
+| Mainnet             | Base, `eip155:8453`           | Tempo, chain 4217                   |
+| Testnet             | Base Sepolia, `eip155:84532`  | Moderato, chain 42431               |
+| Asset               | USDC                          | pathUSD                             |
+
+- x402 here is V2 only. A V1 `X-Payment` header is not recognized as a payment
+  and gets the cold `402`.
+- The x402 payment must accept one of the offers the `402` advertised,
+  unchanged. A modified amount, asset, or recipient matches nothing and is
+  refused.
+- MPP accepts only a credential whose payload is
+  `{"type":"transaction","signature":"0x76..."}`, a signed Tempo transaction
+  this service broadcasts. A hash credential, where you broadcast the transfer
+  yourself, or a proof credential does not pay here.
+- When testnets are allowed the `402` lists the Base Sepolia offer first, so a
+  client taking the first offer it supports pays with faucet money.
+
+## Send exactly one rail
+
+`Payment-Signature` and `Authorization` on one request is a `400`. The
+`Authorization` header belongs to the MPP rail on this service: do not send a
+bearer token or any other scheme beside a payment, it is read as an MPP
+attempt and refused.
+
+## When the money moves
+
+x402 verifies first, which moves nothing, then runs the search, then settles.
+A failed search is never charged, and a result you receive always means the
+payment settled.
+
+An MPP credential is a signed transaction, and verifying it broadcasts it. The
+money moves before the search runs, and the charge stands even if the search
+then fails. The failed response still carries your receipt.
+
+For retry logic: repeating a failed search costs nothing extra on x402 and
+costs the full price again on MPP.
+
+## Errors you will meet
+
+| Answer | Meaning | What to do |
+| ------ | ------- | ---------- |
+| `402`, empty body, challenge headers set | No payment sent, or the payment is on a rail this deployment disables | Read the headers, pay an advertised offer, retry |
+| `402` `{"error":"malformed x402 payment payload"}` | `Payment-Signature` is not base64 JSON in the expected shape | Fix the header encoding |
+| `402` `{"error":"x402 payment did not verify"}` | The accepted offer matches nothing advertised for this path, the payer is restricted, or the facilitator refused. Deliberately one message | Fetch a fresh `402` and pay exactly what it advertises |
+| `402` `{"error":"mpp payment did not verify"}` | Credential missing, unreadable, not a signed transaction, or refused | Same as above |
+| `400` `{"error":"send exactly one payment rail, not both"}` | Both payment headers present | Drop one |
+| `404`, empty body | The path is not sold | Check the table above |
+| `405`, empty body, `Allow: GET,HEAD` | Method not served | Use GET or HEAD |
+| `502` `{"error":"payment facilitator unavailable"}` | x402 verification could not reach the facilitator. Not charged | Retry later |
+| `502` `{"error":"x402 payment could not be settled"}` | Settlement failed after the search ran. The result is withheld and the money did not move | Retry later |
+| `502` `{"error":"upstream error"}` | Brave Search could not be reached. x402: not charged. MPP: charged, receipt attached | Retry, knowing an MPP retry pays again |
+| `503` `{"error":"service temporarily unavailable"}` | The payer could not be screened right now | Retry later. Not charged |
+| Any other status with a Brave body | Brave's own answer, relayed byte for byte. x402: not charged. MPP: charged | Read Brave's error |
+
+## Clients
+
+Any x402 V2 client can pay the x402 rail, and any MPP client can pay the MPP
+rail. For example:
+
+| Client                                                  | Rail         | Notes |
+| ------------------------------------------------------- | ------------ | ----- |
+| purl (https://github.com/stripe/purl)                   | x402         | Does not print the `Payment-Response` receipt; look the transfer up on the chain |
+| @x402/fetch (https://www.npmjs.com/package/@x402/fetch) | x402         |       |
+| mppx (https://www.npmjs.com/package/mppx)               | x402 and MPP | Pays x402 through its own adapter reading `Payment-Required`; pass `--network testnet` against a testnet deployment |
+| tempo request (https://github.com/tempoxyz/wallet-cli)  | MPP          | Pays only on the network passed with `--network`, `tempo-moderato` for the testnet |
+
+## One request, one payment
+
+There is no session, no credit balance, and no top-up. Each request carries
+its own payment, a credential answers one challenge, and challenges expire. A
+receipt proves the payment that bought that one response and buys nothing
+else.
