@@ -12,8 +12,10 @@
  * chain. See `x402.ts` and `mpp.ts` for what each rail advertises.
  */
 
+import { readFileSync } from "node:fs";
 import type { Context } from "./dispatch.js";
 import { ENDPOINTS, type Endpoint } from "./endpoints.js";
+import { AppError } from "./error.js";
 import * as mpp from "./mpp.js";
 import { VERSION } from "./version.js";
 import * as x402 from "./x402.js";
@@ -71,7 +73,7 @@ export interface DiscoveryDocument {
   info: { title: string; version: string };
   "x-service-info": {
     categories: string[];
-    docs: { homepage: string; apiReference: string };
+    docs: { homepage: string; apiReference: string; llms: string };
   };
   paths: Record<string, { get: Operation }>;
 }
@@ -100,7 +102,10 @@ export function document(ctx: Context): DiscoveryDocument {
     info: { title: "bx402", version: VERSION },
     "x-service-info": {
       categories: ["search"],
-      docs: { homepage: HOMEPAGE, apiReference: `${HOMEPAGE}#endpoints` },
+      // The guide link is relative for the same reason there is no `servers`
+      // block: a reader that fetched the document has the origin to resolve
+      // it against, and the service itself does not.
+      docs: { homepage: HOMEPAGE, apiReference: `${HOMEPAGE}#endpoints`, llms: GUIDE_PATH },
     },
     paths,
   };
@@ -128,4 +133,24 @@ function operation(ctx: Context, endpoint: Endpoint): Operation {
     stated["x-payment-info"] = { offers };
   }
   return stated;
+}
+
+/**
+ * The buyer's guide, read from `llms.txt` beside the package manifest. The
+ * build is `tsc` alone with no bundler, so the file cannot be imported as a
+ * module; it sits one level up from `src` and from the compiled `dist` alike,
+ * the same trick `version.ts` uses for the manifest.
+ *
+ * Called when the routes are built, never at module load. A missing or
+ * unreadable file refuses startup: serving a 404 instead would mean a healthy
+ * looking deployment whose document advertises a guide it does not have.
+ */
+export function guide(): string {
+  try {
+    return readFileSync(new URL("../llms.txt", import.meta.url), "utf8");
+  } catch (err: unknown) {
+    throw AppError.invalidConfig(
+      `the buyer's guide llms.txt cannot be read: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }

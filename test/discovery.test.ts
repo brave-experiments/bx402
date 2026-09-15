@@ -1,7 +1,7 @@
 import { validate } from "mppx/discovery";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Config } from "../src/config.js";
-import { type DiscoveryDocument, document } from "../src/discovery.js";
+import { type DiscoveryDocument, document, GUIDE_PATH } from "../src/discovery.js";
 import { context } from "../src/dispatch.js";
 import { ENDPOINTS } from "../src/endpoints.js";
 import { Metrics } from "../src/metrics.js";
@@ -119,6 +119,9 @@ describe("discovery", () => {
     expect(doc.info.title).toBe("bx402");
     expect(doc.info.version).toBe(VERSION);
     expect(Object.keys(doc.paths)).toHaveLength(ENDPOINTS.length);
+    // Relative, so a reader resolves it against wherever the document was
+    // fetched from, an origin the service itself never learns.
+    expect(doc["x-service-info"].docs.llms).toBe(GUIDE_PATH);
   });
 
   it("a_disabled_rail_is_not_advertised", async () => {
