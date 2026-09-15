@@ -39,8 +39,11 @@ const DURATION_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 8, 15, 30];
  */
 const OTHER = "other";
 
-/** Liveness probe path, repeated here so the label cannot drift from the route. */
-const HEALTH_PATH = "/health";
+/**
+ * The free routes, each counted under its own path. The literals are repeated
+ * here rather than imported so a label cannot drift from its route.
+ */
+const FREE_PATHS = new Set(["/health", "/openapi.json", "/llms.txt"]);
 
 /** Why a request was answered with a challenge instead of served. */
 export const challenge = {
@@ -260,13 +263,13 @@ export class Metrics {
 }
 
 /**
- * The label for a request path: the paid endpoint it names, the health probe, or
- * `other`. Drawn from the catalog rather than the request, so a caller cannot
- * mint label values by asking for paths that do not exist.
+ * The label for a request path: the paid endpoint or free route it names, or
+ * `other`. Drawn from the catalog and the fixed set rather than the request,
+ * so a caller cannot mint label values by asking for paths that do not exist.
  */
 export function endpointLabel(path: string): string {
-  if (path === HEALTH_PATH) {
-    return HEALTH_PATH;
+  if (FREE_PATHS.has(path)) {
+    return path;
   }
   return find(path)?.path ?? OTHER;
 }

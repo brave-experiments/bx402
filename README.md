@@ -129,6 +129,14 @@ bills per query and per token, which one fixed price in a `402` cannot express.
 A payment is checked against the price of the path it is sent to, so a credential bought
 for Autosuggest does not pay for a web search.
 
+## Discovery
+
+`GET /openapi.json` serves a machine-readable description of every paid path and the
+offers each enabled rail advertises, following MPP's payment discovery draft.
+`GET /llms.txt` serves the buyer's guide in prose, linked from the document's
+`docs.llms`. Both are free and cached for five minutes; discovery is advisory, and the
+`402` challenge stays authoritative.
+
 ## Networks
 
 Both rails charge the same price for the same endpoint, to the same treasury, in base

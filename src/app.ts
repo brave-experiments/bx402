@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Dispatcher } from "undici";
 import type { Config } from "./config.js";
+import { CACHE_CONTROL, DISCOVERY_PATH, document, GUIDE_PATH, guide } from "./discovery.js";
 import { context, dispatch } from "./dispatch.js";
 import { ENDPOINTS } from "./endpoints.js";
 import { AppError, emptyBody } from "./error.js";
@@ -49,6 +50,33 @@ export async function app(
   // Liveness probe: 200 with an empty body while the server is up.
   hono.on(ALLOWED_METHODS, HEALTH_PATH, () => emptyBody(200));
 
+  // The discovery document and the buyer's guide are served free, since they
+  // are how a client learns what is for sale before paying. Registered
+  // outside the endpoint loop, so dispatch never runs for them and neither
+  // path can turn payable. Both bodies are built and encoded once: nothing in
+  // either varies per request, and the rails the document reads are fixed at
+  // startup. The responses are built by hand rather than through `c.json()`,
+  // which would append a charset to the content type.
+  const served = [
+    {
+      path: DISCOVERY_PATH,
+      type: "application/json",
+      body: Buffer.from(JSON.stringify(document(ctx))),
+    },
+    { path: GUIDE_PATH, type: "text/plain; charset=utf-8", body: Buffer.from(guide()) },
+  ];
+  for (const { path, type, body } of served) {
+    hono.on(
+      ALLOWED_METHODS,
+      path,
+      (c) =>
+        // A HEAD carries the headers of the GET and none of the body.
+        new Response(c.req.method === "HEAD" ? null : body, {
+          headers: { "content-type": type, "cache-control": CACHE_CONTROL },
+        }),
+    );
+  }
+
   for (const endpoint of ENDPOINTS) {
     // The dispatch gate runs only for the methods the route serves, so an
     // unsupported method gets the plain 405 rather than a payable 402 whose
@@ -60,7 +88,11 @@ export async function app(
 
   // Registered after the served methods, so it answers only a method those did
   // not match. A path we do not serve falls through to the 404 below instead.
-  for (const path of [HEALTH_PATH, ...ENDPOINTS.map((endpoint) => endpoint.path)]) {
+  for (const path of [
+    HEALTH_PATH,
+    ...served.map((entry) => entry.path),
+    ...ENDPOINTS.map((endpoint) => endpoint.path),
+  ]) {
     hono.all(path, () => methodNotAllowed());
   }
 

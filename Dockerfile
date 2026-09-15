@@ -29,6 +29,9 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --prod \
     && rm -rf "$(pnpm store path)" ~/.cache/node/corepack
 COPY --from=builder /app/dist ./dist
+# The buyer's guide is served off disk at runtime; without it the service
+# refuses to start.
+COPY llms.txt ./
 
 # Expose the traffic port and the metrics port. Only the first should ever be
 # reachable from outside the network.

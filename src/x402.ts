@@ -11,8 +11,10 @@ import type { FacilitatorConfig } from "@x402/core/http";
 import { encodePaymentRequiredHeader, encodePaymentResponseHeader } from "@x402/core/http";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
-import { getDefaultAsset } from "@x402/evm";
+import { findDefaultAsset, getDefaultAsset } from "@x402/evm";
+import { base, baseSepolia } from "viem/chains";
 import type { X402Config } from "./config.js";
+import type { Offer } from "./discovery.js";
 import { ENDPOINTS, find } from "./endpoints.js";
 import { AppError, jsonError } from "./error.js";
 import { log } from "./log.js";
@@ -45,9 +47,23 @@ const PAY_TO_EVM = "0xbd9420A98a7Bd6B89765e5715e169481602D9c3d";
 /** What this rail calls itself in metrics. */
 export const RAIL = "x402";
 
-/** Base mainnet and the Base Sepolia testnet, in CAIP-2 form. */
-const BASE = "eip155:8453" as const;
-const BASE_SEPOLIA = "eip155:84532" as const;
+/**
+ * The payment method identifier discovery offers carry for this rail. Stated
+ * apart from the metrics name, so relabeling one can never move the other.
+ */
+const X402_METHOD = "x402";
+
+/**
+ * The networks this rail sells on, in the order offers are advertised: the
+ * CAIP-2 id the protocol names, and the viem definition that names the chain
+ * in words. Whether each is a testnet is stated rather than read off the
+ * chain, so a definition that stops carrying the flag cannot quietly turn a
+ * testnet into money.
+ */
+const NETWORKS = [
+  { caip2: "eip155:84532", chain: baseSepolia, testnet: true },
+  { caip2: "eip155:8453", chain: base, testnet: false },
+] as const;
 
 /** How the advertised asset moves. Every offer we make is an EIP-3009 transfer. */
 const ASSET_TRANSFER_METHOD = "eip3009";
@@ -89,14 +105,14 @@ export function hasPayment(headers: Headers): boolean {
  * with faucet money rather than the real thing.
  */
 export function accepts(allowTestnet: boolean): Map<string, PaymentRequirements[]> {
-  const networks = allowTestnet ? [BASE_SEPOLIA, BASE] : [BASE];
+  const networks = NETWORKS.filter((network) => allowTestnet || !network.testnet);
   const table = new Map<string, PaymentRequirements[]>();
   for (const endpoint of ENDPOINTS) {
-    const offers = networks.map((network) => {
-      const asset = getDefaultAsset(network);
+    const offers = networks.map(({ caip2 }) => {
+      const asset = getDefaultAsset(caip2);
       return {
         scheme: "exact",
-        network,
+        network: caip2,
         amount: String(endpoint.priceBaseUnits),
         asset: asset.asset,
         payTo: PAY_TO_EVM,
@@ -234,6 +250,38 @@ function pathOf(resource: string): string {
   } catch {
     return resource;
   }
+}
+
+/**
+ * The offers this rail states in the discovery document for `path`: one per
+ * advertised network, in the order the cold `402` lists them. Read off the
+ * `accepts` table, so discovery can never disagree with the challenge. Empty
+ * for a path that is not sold.
+ */
+export function offers(client: Client, path: string): Offer[] {
+  return (client.accepts.get(path) ?? []).map((entry) => ({
+    intent: "charge",
+    method: X402_METHOD,
+    amount: entry.amount,
+    currency: entry.asset,
+    description: describeOffer(entry),
+  }));
+}
+
+/**
+ * One advertised requirement's token and chain in words. The discovery offer
+ * object has no network field, so this sentence is the only place a reader
+ * learns which chain an offer settles on. The fallbacks cannot fire for
+ * entries built by `accepts`, but an unknown network or asset is still named
+ * by its identifier rather than dropped or thrown on.
+ */
+function describeOffer(entry: PaymentRequirements): string {
+  const symbol = findDefaultAsset(entry.asset, entry.network)?.symbol ?? entry.asset;
+  const network = NETWORKS.find((candidate) => candidate.caip2 === entry.network);
+  if (network === undefined) {
+    return `${symbol} on ${entry.network}`;
+  }
+  return `${symbol} on ${network.chain.name}${network.testnet ? " (testnet)" : ""}`;
 }
 
 /**

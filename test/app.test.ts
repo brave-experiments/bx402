@@ -120,6 +120,72 @@ describe("app", () => {
     expect(response.status).toBe(200);
   });
 
+  it("discovery_is_served_free_at_openapi_json", async () => {
+    const metrics = new Metrics();
+    const response = await (await buildApp(testConfig(), undefined, metrics)).request(
+      "/openapi.json",
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("cache-control")).toBe("public, max-age=300");
+    // Free means unchallenged: neither rail asks the reader to pay for the map.
+    expect(response.headers.get("payment-required")).toBeNull();
+    expect(response.headers.get("www-authenticate")).toBeNull();
+
+    const doc = (await response.json()) as { paths?: Record<string, unknown> };
+    expect(Object.keys(doc.paths ?? {}).length).toBeGreaterThan(0);
+
+    // Counted under its own label rather than folded into `other`.
+    await assertRecorded(
+      metrics,
+      'bx402_http_requests_total{endpoint="/openapi.json",method="GET",status="200"} 1',
+    );
+  });
+
+  it("discovery_head_carries_the_headers_without_a_body", async () => {
+    const response = await (await buildApp(testConfig(), undefined, new Metrics())).request(
+      "/openapi.json",
+      { method: "HEAD" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(await response.text()).toBe("");
+  });
+
+  it("the_guide_is_served_free_at_llms_txt", async () => {
+    const metrics = new Metrics();
+    const response = await (await buildApp(testConfig(), undefined, metrics)).request("/llms.txt");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(response.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(response.headers.get("payment-required")).toBeNull();
+    expect(response.headers.get("www-authenticate")).toBeNull();
+
+    // The guide the document links is the file at the repository root.
+    expect(await response.text()).toMatch(/^# bx402\n/);
+
+    // Counted under its own label rather than folded into `other`.
+    await assertRecorded(
+      metrics,
+      'bx402_http_requests_total{endpoint="/llms.txt",method="GET",status="200"} 1',
+    );
+  });
+
+  it("guide_head_carries_the_headers_without_a_body", async () => {
+    const response = await (await buildApp(testConfig(), undefined, new Metrics())).request(
+      "/llms.txt",
+      { method: "HEAD" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(await response.text()).toBe("");
+  });
+
   it("an_unsold_endpoint_is_404_not_a_payable_402", async () => {
     // The Answers API is deliberately not sold.
     const response = await (await buildApp(testConfig(), undefined, new Metrics())).request(
@@ -708,6 +774,18 @@ describe("app", () => {
       {
         name: "unsupported method",
         path: "/res/v1/web/search",
+        init: { method: "POST" },
+        expected: 405,
+      },
+      {
+        name: "unsupported method on discovery",
+        path: "/openapi.json",
+        init: { method: "POST" },
+        expected: 405,
+      },
+      {
+        name: "unsupported method on the guide",
+        path: "/llms.txt",
         init: { method: "POST" },
         expected: 405,
       },
