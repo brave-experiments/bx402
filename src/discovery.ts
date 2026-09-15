@@ -12,6 +12,12 @@
  * chain. See `x402.ts` and `mpp.ts` for what each rail advertises.
  */
 
+import type { Context } from "./dispatch.js";
+import { ENDPOINTS, type Endpoint } from "./endpoints.js";
+import * as mpp from "./mpp.js";
+import { VERSION } from "./version.js";
+import * as x402 from "./x402.js";
+
 /** Where the discovery document is served. The spec fixes this exact path. */
 export const DISCOVERY_PATH = "/openapi.json";
 
@@ -42,4 +48,84 @@ export interface Offer {
   currency: string;
   /** The token and chain in words, since no field states them. */
   description: string;
+}
+
+/** Where the project documents itself for a human reader. */
+const HOMEPAGE = "https://github.com/brave-experiments/bx402";
+
+/** One paid path's `get` operation, as far as the document states it. */
+interface Operation {
+  summary: string;
+  /**
+   * Absent rather than empty when no rail is enabled: the extension requires
+   * at least one offer, and a document must not advertise what cannot be
+   * paid. The `402` declaration below stays either way.
+   */
+  "x-payment-info"?: { offers: Offer[] };
+  responses: Record<string, { description: string }>;
+}
+
+/** The discovery document's shape, as far as this service states it. */
+export interface DiscoveryDocument {
+  openapi: string;
+  info: { title: string; version: string };
+  "x-service-info": {
+    categories: string[];
+    docs: { homepage: string; apiReference: string };
+  };
+  paths: Record<string, { get: Operation }>;
+}
+
+/**
+ * The discovery document: the spec's OpenAPI shape naming every paid path
+ * and the offers the deployment's rails advertise for it.
+ *
+ * Composed from the same rail state the paid routes dispatch on, so the
+ * document cannot drift from what a request is actually charged. It stays
+ * advisory all the same: the runtime `402` challenge is authoritative, which
+ * is why every operation declares that response.
+ *
+ * There is no `servers` block. The service never learns its public origin,
+ * so paths stay relative to wherever the document was fetched from.
+ */
+export function document(ctx: Context): DiscoveryDocument {
+  const paths: Record<string, { get: Operation }> = {};
+  for (const endpoint of ENDPOINTS) {
+    paths[endpoint.path] = { get: operation(ctx, endpoint) };
+  }
+  return {
+    openapi: "3.1.0",
+    // The build version stands in for the API version, so a release bumps
+    // the document even when the paid surface is unchanged.
+    info: { title: "bx402", version: VERSION },
+    "x-service-info": {
+      categories: ["search"],
+      docs: { homepage: HOMEPAGE, apiReference: `${HOMEPAGE}#endpoints` },
+    },
+    paths,
+  };
+}
+
+/**
+ * One paid path's operation: each enabled rail's offers, in the order the
+ * cold `402` lists the rails, with x402's testnet-first network order kept
+ * inside its slice.
+ */
+function operation(ctx: Context, endpoint: Endpoint): Operation {
+  const mppOffer = ctx.mpp === undefined ? undefined : mpp.offer(ctx.mpp, endpoint.path);
+  const offers = [
+    ...(ctx.x402 === undefined ? [] : x402.offers(ctx.x402, endpoint.path)),
+    ...(mppOffer === undefined ? [] : [mppOffer]),
+  ];
+  const stated: Operation = {
+    summary: endpoint.description,
+    responses: {
+      "200": { description: "Successful response" },
+      "402": { description: "Payment Required" },
+    },
+  };
+  if (offers.length > 0) {
+    stated["x-payment-info"] = { offers };
+  }
+  return stated;
 }
