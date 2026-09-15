@@ -11,10 +11,18 @@ import { Mppx, tempo } from "mppx/server";
 import * as Secp256k1 from "ox/Secp256k1";
 import { TxEnvelopeTempo } from "ox/tempo";
 import { request } from "undici";
-import { type Chain, formatUnits, HttpRequestError, SocketClosedError, TimeoutError } from "viem";
+import {
+  type Chain,
+  formatUnits,
+  HttpRequestError,
+  parseUnits,
+  SocketClosedError,
+  TimeoutError,
+} from "viem";
 import { createClient, http } from "viem/tempo";
 import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 import type { MppConfig } from "./config.js";
+import type { Offer } from "./discovery.js";
 import { ENDPOINTS, find } from "./endpoints.js";
 import { AppError, jsonError } from "./error.js";
 import { log } from "./log.js";
@@ -42,6 +50,13 @@ const PAYMENT_RECEIPT_HEADER = "payment-receipt";
 
 /** What this rail calls itself in metrics. */
 export const RAIL = "mpp";
+
+/**
+ * The payment method identifier MPP challenges carry. Discovery offers name
+ * the same method, so a reader can match an offer to the challenge scheme
+ * that pays it.
+ */
+const TEMPO_METHOD = "tempo";
 
 /**
  * Shared message for every refused payment, so a missing, malformed,
@@ -222,6 +237,45 @@ function charges(chainId: number): Map<string, Charge> {
     });
   }
   return table;
+}
+
+/**
+ * The offer this rail states in the discovery document for `path`, read off
+ * the `charges` table so discovery can never disagree with the challenge.
+ * `undefined` for a path that is not sold.
+ *
+ * The charge states a decimal amount while a discovery offer states base
+ * units, so the conversion runs back through `parseUnits` on the very charge
+ * the challenge advertises rather than reading the catalog a second time.
+ */
+export function offer(client: Client, path: string): Offer | undefined {
+  const charge = client.charges.get(path);
+  if (charge === undefined) {
+    return undefined;
+  }
+  return {
+    intent: "charge",
+    method: TEMPO_METHOD,
+    amount: String(parseUnits(charge.amount, charge.decimals)),
+    currency: charge.currency,
+    description: describeOffer(charge),
+  };
+}
+
+/**
+ * The offer's token and chain in words. The discovery offer object has no
+ * network field, so this sentence is the only place a reader learns which
+ * Tempo network a deployment settles on. viem's chain names mark the testnet
+ * themselves ("Tempo Testnet (Moderato)"). The fallback cannot fire for
+ * charges built by `charges`, but an unknown chain id is still named rather
+ * than dropped or thrown on.
+ */
+function describeOffer(charge: Charge): string {
+  const network = NETWORKS.get(charge.chainId);
+  if (network === undefined) {
+    return `pathUSD on Tempo chain ${charge.chainId}`;
+  }
+  return `pathUSD on ${network.chain.name}`;
 }
 
 /** The chain id the RPC endpoint reports for itself (`eth_chainId`). */
