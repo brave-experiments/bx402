@@ -1,7 +1,14 @@
 import { generateKeyPairSync } from "node:crypto";
 import type { PaymentPayload } from "@x402/core/types";
 import { afterEach, describe, expect, it } from "vitest";
-import { accepts, challenge, client, decodePayment, PAYMENT_REQUIRED_HEADER } from "../src/x402.js";
+import {
+  accepts,
+  challenge,
+  client,
+  decodePayment,
+  offers,
+  PAYMENT_REQUIRED_HEADER,
+} from "../src/x402.js";
 import { decodeChallenge, mockOrigin, restoreNetwork, testConfig } from "./support.js";
 
 /** The offers advertised for one paid path. */
@@ -56,6 +63,32 @@ describe("x402", () => {
     // The cheap offer is not among the dear endpoint's, so accepting it there
     // finds no match in `handle` and the payment is refused.
     expect(web).not.toContainEqual(suggest[0]);
+  });
+
+  it("discovery_offers_restate_the_accepts_table", () => {
+    const built = client({ facilitatorUrl: "https://x402.org/facilitator", cdp: undefined }, true);
+    const entries = offersFor(true, "/res/v1/web/search");
+
+    const stated = offers(built, "/res/v1/web/search");
+    expect(stated).toHaveLength(entries.length);
+    for (const [index, offer] of stated.entries()) {
+      expect(offer.intent).toBe("charge");
+      expect(offer.method).toBe("x402");
+      expect(offer.amount).toBe(entries[index]?.amount);
+      expect(offer.currency).toBe(entries[index]?.asset);
+    }
+
+    // The chain is named in words, testnet first like the cold 402, since the
+    // offer object has no network field a reader could tell them apart by.
+    expect(stated.map((offer) => offer.description)).toEqual([
+      "USDC on Base Sepolia (testnet)",
+      "USDC on Base",
+    ]);
+  });
+
+  it("discovery_offers_are_empty_for_a_path_that_is_not_sold", () => {
+    const built = client({ facilitatorUrl: "https://x402.org/facilitator", cdp: undefined }, true);
+    expect(offers(built, "/res/v1/answers/search")).toEqual([]);
   });
 
   it("decode_reads_the_offer_the_payer_accepted", () => {
