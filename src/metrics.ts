@@ -74,6 +74,8 @@ export const outcome = {
   UNSUPPORTED: "unsupported",
   /** The payment was read and understood, and did not verify. */
   REFUSED: "refused",
+  /** The same payment was already in flight or recently decided. */
+  DUPLICATE: "duplicate",
   /** The payer did not clear address screening. */
   SCREENED_OUT: "screened_out",
   /** We could not reach the facilitator or the chain. */

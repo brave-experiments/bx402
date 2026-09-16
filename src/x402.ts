@@ -13,6 +13,7 @@ import { HTTPFacilitatorClient } from "@x402/core/server";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { findDefaultAsset, getDefaultAsset } from "@x402/evm";
 import { base, baseSepolia } from "viem/chains";
+import { ClaimStore } from "./claims.js";
 import type { X402Config } from "./config.js";
 import type { Offer } from "./discovery.js";
 import { ENDPOINTS, find } from "./endpoints.js";
@@ -159,6 +160,13 @@ export interface Client {
    * price.
    */
   accepts: Map<string, PaymentRequirements[]>;
+  /**
+   * Claims over payment replay keys. A payment's key is claimed before any
+   * facilitator or upstream call and held while the payment is in flight and
+   * briefly after the facilitator decides on it, so one payment buys at most
+   * one search. The store's scope and bounds are documented in `claims.ts`.
+   */
+  claims: ClaimStore;
 }
 
 /**
@@ -201,6 +209,7 @@ export function client(rail: X402Config, allowTestnet: boolean): Client {
   return {
     facilitator: new HTTPFacilitatorClient(config),
     accepts: accepts(allowTestnet),
+    claims: new ClaimStore(),
   };
 }
 
@@ -385,10 +394,11 @@ const EIP3009_NONCE = /^0x[0-9a-fA-F]{64}$/;
 
 /**
  * Decode the client's base64 JSON payment from `PAYMENT-SIGNATURE` into the raw
- * payload, the offer the payer says it accepted, and the payer to screen,
+ * payload, the offer the payer says it accepted, the payer to screen,
  * lowercased to the screener's canonical form (EVM addresses are
- * case-insensitive hex). `undefined` if the header is absent, not the base64
- * JSON required, or the payload carries no well-formed eip3009 authorization.
+ * case-insensitive hex), and the replay claim the payment is deduplicated
+ * under. `undefined` if the header is absent, not the base64 JSON required,
+ * or the payload carries no well-formed eip3009 authorization.
  *
  * Every offer we advertise is an eip3009 transfer, so a payload without a
  * plausible `authorization` (a permit2 shape, say) is malformed for all of
@@ -400,6 +410,7 @@ export function decodePayment(headers: Headers):
       payload: PaymentPayload;
       accepted: PaymentRequirements;
       payer: string;
+      claim: { key: string; expires: number };
     }
   | undefined {
   const header = headers.get(V2_PAYMENT_HEADER);
@@ -434,10 +445,20 @@ export function decodePayment(headers: Headers):
   if (typeof nonce !== "string" || !EIP3009_NONCE.test(nonce)) {
     return undefined;
   }
+  const payer = from.toLowerCase();
   return {
     payload: payload as unknown as PaymentPayload,
     accepted: accepted as PaymentRequirements,
-    payer: from.toLowerCase(),
+    payer,
+    claim: {
+      // The nonce is what settlement consumes on chain, so however a client
+      // re-encodes one payment it always maps to one key. The window is the
+      // fixed offer timeout rather than the client's own deadline, so a
+      // sender cannot shorten how long its payment is held against
+      // duplicates.
+      key: `${payer}:${nonce.toLowerCase()}`,
+      expires: Date.now() + MAX_TIMEOUT_SECONDS * 1000,
+    },
   };
 }
 
