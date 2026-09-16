@@ -299,6 +299,8 @@ function describeOffer(entry: PaymentRequirements): string {
  * charged for a response they do not get, nor served one they did not pay for:
  *
  * - payment missing, malformed, or rejected: `402`, before any upstream call.
+ * - payment already in flight or recently decided: `402`, before any
+ *   facilitator call.
  * - facilitator unreachable on verify: `502`.
  * - search fails (4xx or 5xx): relayed as is, settlement skipped.
  * - settlement fails: `502`, the response body withheld.
@@ -321,7 +323,7 @@ export async function handle(
   if (decoded === undefined) {
     return ended(outcome.MALFORMED, paymentRejected(MALFORMED_PAYMENT));
   }
-  const { payload, accepted, payer } = decoded;
+  const { payload, accepted, payer, claim } = decoded;
 
   // The payer must accept an offer we advertised for the path it is calling, so
   // it can name neither its own price, asset, and recipient, nor another
@@ -331,61 +333,83 @@ export async function handle(
     return ended(outcome.NO_OFFER, paymentRejected(GENERIC_REJECTION));
   }
 
-  // Screen the payer before any facilitator or upstream call, so a blocked
-  // signer touches neither.
-  if (screener !== undefined) {
-    const denied = await screener.requireAllowed(payer, paymentRejected(GENERIC_REJECTION));
-    if (denied !== undefined) {
-      return ended(outcome.SCREENED_OUT, denied);
+  // One payment buys one search. The key is claimed before the first await,
+  // so concurrent requests carrying the same payment are refused here before
+  // they reach the screener, the facilitator, or the upstream. Refused like
+  // any other payment we decline, so a duplicate learns nothing new.
+  const token = client.claims.tryClaim(claim.key, claim.expires);
+  if (token === undefined) {
+    return ended(outcome.DUPLICATE, paymentRejected(GENERIC_REJECTION));
+  }
+
+  // The claim is released when the payment never reached a settlement
+  // decision, so a payment failing through no fault of its own can be
+  // retried. Once the facilitator decides, either way, the claim is kept
+  // until it lapses: a settled payment must not buy another search, and
+  // retrying a refused settlement would buy a search per attempt.
+  let decided = false;
+  try {
+    // Screen the payer before any facilitator or upstream call, so a blocked
+    // signer touches neither.
+    if (screener !== undefined) {
+      const denied = await screener.requireAllowed(payer, paymentRejected(GENERIC_REJECTION));
+      if (denied !== undefined) {
+        return ended(outcome.SCREENED_OUT, denied);
+      }
+    }
+
+    // Verify before doing any work. A facilitator we cannot reach is our
+    // failure, not the client's, so it is a 502 rather than a 402.
+    const verifyStarted = performance.now();
+    let verified: { isValid: boolean };
+    try {
+      verified = await client.facilitator.verify(payload, offer);
+    } catch (err: unknown) {
+      metrics.recordPaymentStep(RAIL, step.VERIFY, seconds(verifyStarted));
+      log.error(`x402 facilitator verify failed: ${describe(err)}`);
+      return ended(outcome.NETWORK_UNAVAILABLE, gatewayError("payment facilitator unavailable"));
+    }
+    metrics.recordPaymentStep(RAIL, step.VERIFY, seconds(verifyStarted));
+    if (verified.isValid !== true) {
+      return ended(outcome.REFUSED, paymentRejected(GENERIC_REJECTION));
+    }
+
+    const response = await runSearch();
+    if (!response.ok) {
+      return ended(outcome.UPSTREAM_FAILED, response);
+    }
+
+    // The value we verified settles unchanged. Withhold the already produced
+    // body unless it settles.
+    const settleStarted = performance.now();
+    let receipt: { success: boolean };
+    try {
+      receipt = await client.facilitator.settle(payload, offer);
+    } catch (err: unknown) {
+      metrics.recordPaymentStep(RAIL, step.SETTLE, seconds(settleStarted));
+      log.error(`x402 facilitator settle failed: ${describe(err)}`);
+      return ended(outcome.SETTLE_FAILED, gatewayError(SETTLE_FAILED));
+    }
+    metrics.recordPaymentStep(RAIL, step.SETTLE, seconds(settleStarted));
+    decided = true;
+    if (receipt.success !== true) {
+      log.error(`x402 facilitator reported settlement failure: ${JSON.stringify(receipt)}`);
+      return ended(outcome.SETTLE_FAILED, gatewayError(SETTLE_FAILED));
+    }
+
+    metrics.recordPayment(RAIL, endpoint, outcome.SETTLED);
+    // The price comes from the catalog, so what we count as earned is what we
+    // advertised rather than anything the payer said.
+    const sold = find(endpoint);
+    if (sold !== undefined) {
+      metrics.recordCharge(RAIL, endpoint, sold.priceBaseUnits);
+    }
+    return attachReceipt(response, receipt);
+  } finally {
+    if (!decided) {
+      client.claims.release(claim.key, token);
     }
   }
-
-  // Verify before doing any work. A facilitator we cannot reach is our failure,
-  // not the client's, so it is a 502 rather than a 402.
-  const verifyStarted = performance.now();
-  let verified: { isValid: boolean };
-  try {
-    verified = await client.facilitator.verify(payload, offer);
-  } catch (err: unknown) {
-    metrics.recordPaymentStep(RAIL, step.VERIFY, seconds(verifyStarted));
-    log.error(`x402 facilitator verify failed: ${describe(err)}`);
-    return ended(outcome.NETWORK_UNAVAILABLE, gatewayError("payment facilitator unavailable"));
-  }
-  metrics.recordPaymentStep(RAIL, step.VERIFY, seconds(verifyStarted));
-  if (verified.isValid !== true) {
-    return ended(outcome.REFUSED, paymentRejected(GENERIC_REJECTION));
-  }
-
-  const response = await runSearch();
-  if (!response.ok) {
-    return ended(outcome.UPSTREAM_FAILED, response);
-  }
-
-  // The value we verified settles unchanged. Withhold the already produced body
-  // unless it settles.
-  const settleStarted = performance.now();
-  let receipt: { success: boolean };
-  try {
-    receipt = await client.facilitator.settle(payload, offer);
-  } catch (err: unknown) {
-    metrics.recordPaymentStep(RAIL, step.SETTLE, seconds(settleStarted));
-    log.error(`x402 facilitator settle failed: ${describe(err)}`);
-    return ended(outcome.SETTLE_FAILED, gatewayError(SETTLE_FAILED));
-  }
-  metrics.recordPaymentStep(RAIL, step.SETTLE, seconds(settleStarted));
-  if (receipt.success !== true) {
-    log.error(`x402 facilitator reported settlement failure: ${JSON.stringify(receipt)}`);
-    return ended(outcome.SETTLE_FAILED, gatewayError(SETTLE_FAILED));
-  }
-
-  metrics.recordPayment(RAIL, endpoint, outcome.SETTLED);
-  // The price comes from the catalog, so what we count as earned is what we
-  // advertised rather than anything the payer said.
-  const sold = find(endpoint);
-  if (sold !== undefined) {
-    metrics.recordCharge(RAIL, endpoint, sold.priceBaseUnits);
-  }
-  return attachReceipt(response, receipt);
 }
 
 /** The authorization fields a payment must carry: an EVM address and a 32-byte nonce. */
