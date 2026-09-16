@@ -47,20 +47,31 @@ afterEach(async () => {
   restoreS3();
 });
 
+/**
+ * The authorization every paying test carries by default. Decoding requires a
+ * plausible payer and nonce, and the mock facilitator accepts the rest.
+ */
+const TEST_AUTHORIZATION = {
+  from: "0x1111111111111111111111111111111111111111",
+  nonce: `0x${"aa".repeat(32)}`,
+};
+
 /** The headers a paying x402 client sends for `path`. */
 function paid(path: string): { headers: Record<string, string> } {
-  return { headers: { "payment-signature": paymentSignature(path) } };
+  return {
+    headers: {
+      "payment-signature": paymentSignature(path, { authorization: TEST_AUTHORIZATION }),
+    },
+  };
 }
 
-/**
- * `paid`, naming `from` as the payer so the screener has an address to check.
- * The scheme payload only needs `authorization.from`; the mock facilitator
- * accepts the rest.
- */
+/** `paid`, naming `from` as the payer so the screener has an address to check. */
 function paidFrom(path: string, from: string): { headers: Record<string, string> } {
   return {
     headers: {
-      "payment-signature": paymentSignature(path, { authorization: { from } }),
+      "payment-signature": paymentSignature(path, {
+        authorization: { ...TEST_AUTHORIZATION, from },
+      }),
     },
   };
 }

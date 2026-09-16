@@ -379,20 +379,27 @@ export async function handle(
   return attachReceipt(response, receipt);
 }
 
+/** The authorization fields a payment must carry: an EVM address and a 32-byte nonce. */
+const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const EIP3009_NONCE = /^0x[0-9a-fA-F]{64}$/;
+
 /**
  * Decode the client's base64 JSON payment from `PAYMENT-SIGNATURE` into the raw
- * payload, the offer the payer says it accepted, and the payer to screen.
- * `undefined` if the header is absent or not the base64 JSON required.
+ * payload, the offer the payer says it accepted, and the payer to screen,
+ * lowercased to the screener's canonical form (EVM addresses are
+ * case-insensitive hex). `undefined` if the header is absent, not the base64
+ * JSON required, or the payload carries no well-formed eip3009 authorization.
  *
- * The payer is present only for the eip3009 payload we advertise; a payload
- * without `authorization.from` (a permit2 shape, say) yields none, which the
- * caller rejects before any facilitator call when screening is on.
+ * Every offer we advertise is an eip3009 transfer, so a payload without a
+ * plausible `authorization` (a permit2 shape, say) is malformed for all of
+ * them and is refused here, before it can reach the screener or the
+ * facilitator carrying no identity.
  */
 export function decodePayment(headers: Headers):
   | {
       payload: PaymentPayload;
       accepted: PaymentRequirements;
-      payer: string | undefined;
+      payer: string;
     }
   | undefined {
   const header = headers.get(V2_PAYMENT_HEADER);
@@ -412,18 +419,6 @@ export function decodePayment(headers: Headers):
   if (typeof accepted !== "object" || accepted === null) {
     return undefined;
   }
-  return {
-    payload: payload as unknown as PaymentPayload,
-    accepted: accepted as PaymentRequirements,
-    payer: payerAddress(payload),
-  };
-}
-
-/**
- * The payer to screen: the eip3009 `authorization.from`, lowercased to the
- * screener's canonical form (EVM addresses are case-insensitive hex).
- */
-function payerAddress(payload: Record<string, unknown>): string | undefined {
   const scheme = payload.payload;
   if (typeof scheme !== "object" || scheme === null) {
     return undefined;
@@ -432,8 +427,18 @@ function payerAddress(payload: Record<string, unknown>): string | undefined {
   if (typeof authorization !== "object" || authorization === null) {
     return undefined;
   }
-  const from = (authorization as Record<string, unknown>).from;
-  return typeof from === "string" ? from.toLowerCase() : undefined;
+  const { from, nonce } = authorization as Record<string, unknown>;
+  if (typeof from !== "string" || !EVM_ADDRESS.test(from)) {
+    return undefined;
+  }
+  if (typeof nonce !== "string" || !EIP3009_NONCE.test(nonce)) {
+    return undefined;
+  }
+  return {
+    payload: payload as unknown as PaymentPayload,
+    accepted: accepted as PaymentRequirements,
+    payer: from.toLowerCase(),
+  };
 }
 
 /**

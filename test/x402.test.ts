@@ -27,6 +27,12 @@ function paymentHeaders(payload: unknown): Headers {
   });
 }
 
+/** A well-formed eip3009 authorization, the least a decodable payment carries. */
+const AUTHORIZATION = {
+  from: `0x${"AB".repeat(20)}`,
+  nonce: `0x${"CD".repeat(32)}`,
+};
+
 /**
  * A CDP API key secret that really signs: 64 base64 bytes of Ed25519 seed plus
  * public key, the shape the CDP SDK detects and signs tokens with.
@@ -94,11 +100,32 @@ describe("x402", () => {
   it("decode_reads_the_offer_the_payer_accepted", () => {
     const entries = offersFor(true, "/res/v1/web/search");
 
-    const decoded = decodePayment(paymentHeaders({ accepted: entries[0] }));
+    const decoded = decodePayment(
+      paymentHeaders({ accepted: entries[0], payload: { authorization: AUTHORIZATION } }),
+    );
     expect(decoded?.accepted).toEqual(entries[0]);
+    expect(decoded?.payer).toBe(AUTHORIZATION.from.toLowerCase());
 
     // A payload naming no offer at all cannot be read.
-    expect(decodePayment(paymentHeaders({}))).toBeUndefined();
+    expect(decodePayment(paymentHeaders({ payload: { authorization: AUTHORIZATION } }))).toBe(
+      undefined,
+    );
+  });
+
+  it("a_payment_without_a_full_authorization_cannot_be_read", () => {
+    // Every offer we advertise is an eip3009 transfer, so a payload lacking a
+    // plausible authorization is malformed for all of them. This includes a
+    // nonce of the wrong size, which must never become a replay key.
+    const entries = offersFor(true, "/res/v1/web/search");
+    const decode = (payload: unknown) =>
+      decodePayment(paymentHeaders({ accepted: entries[0], payload }));
+
+    expect(decode({})).toBeUndefined();
+    expect(decode({ authorization: { from: AUTHORIZATION.from } })).toBeUndefined();
+    expect(decode({ authorization: { nonce: AUTHORIZATION.nonce } })).toBeUndefined();
+    expect(
+      decode({ authorization: { from: AUTHORIZATION.from, nonce: `0x${"cd".repeat(4096)}` } }),
+    ).toBeUndefined();
   });
 
   it("a_tampered_offer_matches_nothing_we_advertise", () => {
@@ -107,7 +134,9 @@ describe("x402", () => {
     const entries = offersFor(true, "/res/v1/web/search");
     const discounted = { ...entries[0], amount: "1" };
 
-    const decoded = decodePayment(paymentHeaders({ accepted: discounted }));
+    const decoded = decodePayment(
+      paymentHeaders({ accepted: discounted, payload: { authorization: AUTHORIZATION } }),
+    );
     expect(decoded).toBeDefined();
     expect(entries).not.toContainEqual(decoded?.accepted);
   });
