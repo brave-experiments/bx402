@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import type { Hono } from "hono";
 import { MockAgent } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
 import { app, banner } from "../src/app.js";
@@ -74,6 +75,41 @@ function paidFrom(path: string, from: string): { headers: Record<string, string>
       }),
     },
   };
+}
+
+/** `paid`, carrying `nonce` so the payment dedupes on a key of the test's choosing. */
+function paidNonce(
+  path: string,
+  nonce: string,
+  from = TEST_AUTHORIZATION.from,
+): { headers: Record<string, string> } {
+  return {
+    headers: {
+      "payment-signature": paymentSignature(path, { authorization: { from, nonce } }),
+    },
+  };
+}
+
+/**
+ * Build an app wired for replay tests: an upstream answering exactly
+ * `searches` searches (a duplicate that slips past the gate fails on a
+ * missing interceptor rather than passing quietly), a verifying facilitator
+ * settling as `settles` says, and fresh metrics.
+ */
+async function replayApp(
+  settles: boolean,
+  searches: number,
+): Promise<{ built: Hono; metrics: Metrics }> {
+  const mock = mockUpstream();
+  mock
+    .get(UPSTREAM)
+    .intercept({ method: "GET", path: "/res/v1/web/search?q=rust" })
+    .reply(200, { web: {} }, { headers: { "content-type": "application/json" } })
+    .times(searches);
+  mockFacilitator(true, settles);
+  const metrics = new Metrics();
+  const built = await buildApp(testConfig(), undefined, metrics, mock);
+  return { built, metrics };
 }
 
 /**
@@ -575,6 +611,145 @@ describe("app", () => {
     expect(response.status).toBe(502);
     expect(response.headers.get("payment-response")).toBeNull();
     expect(await response.json()).toEqual({ error: "x402 payment could not be settled" });
+  });
+
+  it("concurrent_duplicate_payments_trigger_one_upstream_search", async () => {
+    const { built, metrics } = await replayApp(true, 1);
+
+    // Each request claims its key synchronously before its first await, so
+    // exactly one wins regardless of scheduling.
+    const header = paidNonce("/res/v1/web/search", `0x${"11".repeat(32)}`);
+    const responses = await Promise.all(
+      Array.from({ length: 5 }, () => built.request("/res/v1/web/search?q=rust", header)),
+    );
+
+    const statuses = responses.map((response) => response.status).sort();
+    expect(statuses).toEqual([200, 402, 402, 402, 402]);
+    await assertRecorded(
+      metrics,
+      'bx402_upstream_requests_total{endpoint="/res/v1/web/search",status="200"} 1',
+    );
+    await assertPaymentOutcome(metrics, "x402", "settled");
+    await assertRecorded(
+      metrics,
+      'bx402_payments_total{rail="x402",endpoint="/res/v1/web/search",outcome="duplicate"} 4',
+    );
+  });
+
+  it("a_settled_payment_blocks_an_immediate_replay", async () => {
+    const { built, metrics } = await replayApp(true, 1);
+    const header = paidNonce("/res/v1/web/search", `0x${"22".repeat(32)}`);
+
+    const first = await built.request("/res/v1/web/search?q=rust", header);
+    const replay = await built.request("/res/v1/web/search?q=rust", header);
+
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(402);
+    await assertRecorded(
+      metrics,
+      'bx402_upstream_requests_total{endpoint="/res/v1/web/search",status="200"} 1',
+    );
+    await assertPaymentOutcome(metrics, "x402", "duplicate");
+  });
+
+  it("a_refused_settlement_keeps_the_claim", async () => {
+    const { built, metrics } = await replayApp(false, 1);
+    const header = paidNonce("/res/v1/web/search", `0x${"33".repeat(32)}`);
+
+    // The facilitator decided against the payment, so replaying it must not
+    // buy another search per attempt.
+    const first = await built.request("/res/v1/web/search?q=rust", header);
+    const replay = await built.request("/res/v1/web/search?q=rust", header);
+
+    expect(first.status).toBe(502);
+    expect(replay.status).toBe(402);
+    await assertPaymentOutcome(metrics, "x402", "settle_failed");
+    await assertPaymentOutcome(metrics, "x402", "duplicate");
+  });
+
+  it("a_payment_refused_before_any_decision_can_be_retried", async () => {
+    // The first attempt fails on verify, a failure that consumed nothing, so
+    // the claim is released and the identical retry runs in full.
+    const mock = mockUpstream();
+    mockFacilitator(false, true);
+    const metrics = new Metrics();
+    const built = await buildApp(testConfig(), undefined, metrics, mock);
+    const header = paidNonce("/res/v1/web/search", `0x${"44".repeat(32)}`);
+
+    const first = await built.request("/res/v1/web/search?q=rust", header);
+    const retry = await built.request("/res/v1/web/search?q=rust", header);
+
+    expect(first.status).toBe(402);
+    expect(retry.status).toBe(402);
+    await assertRecorded(
+      metrics,
+      'bx402_payments_total{rail="x402",endpoint="/res/v1/web/search",outcome="refused"} 2',
+    );
+    await assertNotRecorded(metrics, 'outcome="duplicate"');
+  });
+
+  it("payments_with_different_nonces_do_not_collide", async () => {
+    const { built, metrics } = await replayApp(true, 2);
+
+    const [first, second] = await Promise.all([
+      built.request(
+        "/res/v1/web/search?q=rust",
+        paidNonce("/res/v1/web/search", `0x${"55".repeat(32)}`),
+      ),
+      built.request(
+        "/res/v1/web/search?q=rust",
+        paidNonce("/res/v1/web/search", `0x${"66".repeat(32)}`),
+      ),
+    ]);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    await assertRecorded(
+      metrics,
+      'bx402_payments_total{rail="x402",endpoint="/res/v1/web/search",outcome="settled"} 2',
+    );
+  });
+
+  it("a_payment_without_a_nonce_is_refused_as_malformed", async () => {
+    // Neither the facilitator nor the upstream is ever asked about a payment
+    // whose authorization cannot carry a replay key.
+    const mock = mockUpstream();
+    const metrics = new Metrics();
+    const built = await buildApp(testConfig(), undefined, metrics, mock);
+    const header = {
+      headers: {
+        "payment-signature": paymentSignature("/res/v1/web/search", {
+          authorization: { from: TEST_AUTHORIZATION.from },
+        }),
+      },
+    };
+
+    const response = await built.request("/res/v1/web/search?q=rust", header);
+
+    expect(response.status).toBe(402);
+    await assertPaymentOutcome(metrics, "x402", "malformed");
+  });
+
+  it("a_screened_payment_releases_its_claim", async () => {
+    const from = "0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B";
+    const screener = screenerBlocking(from);
+    const mock = mockUpstream();
+    const metrics = new Metrics();
+    const built = await buildApp(testConfig(), screener, metrics, mock);
+    const header = paidNonce("/res/v1/web/search", `0x${"77".repeat(32)}`, from);
+
+    const first = await built.request("/res/v1/web/search?q=rust", header);
+    const second = await built.request("/res/v1/web/search?q=rust", header);
+
+    expect(first.status).toBe(402);
+    expect(second.status).toBe(402);
+    // Both refusals are the screen's, so the released claim never counted the
+    // second attempt as a duplicate.
+    await assertRecorded(
+      metrics,
+      'bx402_payments_total{rail="x402",endpoint="/res/v1/web/search",outcome="screened_out"} 2',
+    );
+    await assertNotRecorded(metrics, 'outcome="duplicate"');
   });
 
   it("blocked_signer_is_refused_before_any_call", async () => {

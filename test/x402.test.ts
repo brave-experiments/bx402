@@ -128,6 +128,41 @@ describe("x402", () => {
     ).toBeUndefined();
   });
 
+  it("the_claim_key_is_the_nonce_scoped_by_the_payer", () => {
+    const entries = offersFor(true, "/res/v1/web/search");
+
+    // The same payment under two encodings: key order differs, so the header
+    // bytes differ, but both name one authorization.
+    const first = decodePayment(
+      paymentHeaders({ accepted: entries[0], payload: { authorization: AUTHORIZATION } }),
+    );
+    const second = decodePayment(
+      paymentHeaders({ payload: { authorization: AUTHORIZATION }, accepted: entries[0] }),
+    );
+
+    expect(first?.claim.key).toBe(
+      `${AUTHORIZATION.from.toLowerCase()}:${AUTHORIZATION.nonce.toLowerCase()}`,
+    );
+    expect(second?.claim.key).toBe(first?.claim.key);
+  });
+
+  it("the_claim_window_is_the_offer_timeout_not_the_clients_deadline", () => {
+    // A sender must not shorten how long its payment is held against
+    // duplicates, so a deadline just ahead does not move the expiry.
+    const entries = offersFor(true, "/res/v1/web/search");
+    const validBefore = String(Math.floor(Date.now() / 1000) + 3);
+    const decoded = decodePayment(
+      paymentHeaders({
+        accepted: entries[0],
+        payload: { authorization: { ...AUTHORIZATION, validBefore } },
+      }),
+    );
+
+    const window = (entries[0]?.maxTimeoutSeconds ?? 0) * 1000;
+    expect(decoded?.claim.expires).toBeGreaterThan(Date.now() + window - 5_000);
+    expect(decoded?.claim.expires).toBeLessThanOrEqual(Date.now() + window);
+  });
+
   it("a_tampered_offer_matches_nothing_we_advertise", () => {
     // Here the payer grants itself a discount. The payload still decodes, so it
     // is the value comparison in `handle` that refuses it.
