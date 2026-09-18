@@ -16,7 +16,7 @@ import { base, baseSepolia } from "viem/chains";
 import { ClaimStore } from "./claims.js";
 import type { X402Config } from "./config.js";
 import type { Offer } from "./discovery.js";
-import { ENDPOINTS, find } from "./endpoints.js";
+import { ENDPOINTS, findEndpoint } from "./endpoints.js";
 import { AppError, jsonError } from "./error.js";
 import { log } from "./log.js";
 import { type Metrics, outcome, step } from "./metrics.js";
@@ -227,7 +227,7 @@ export function challenge(
   const path = pathOf(resource);
   // Advertise this endpoint's price and no other. A client that is offered every
   // price at once could pay the cheapest and call the dearest.
-  const endpoint = find(path);
+  const endpoint = findEndpoint(path);
   const offers = client.accepts.get(path);
   if (endpoint === undefined || offers === undefined) {
     log.error(`no x402 offer for a paid path: ${path}`);
@@ -400,7 +400,7 @@ export async function handle(
     metrics.recordPayment(RAIL, endpoint, outcome.SETTLED);
     // The price comes from the catalog, so what we count as earned is what we
     // advertised rather than anything the payer said.
-    const sold = find(endpoint);
+    const sold = findEndpoint(endpoint);
     if (sold !== undefined) {
       metrics.recordCharge(RAIL, endpoint, sold.priceBaseUnits);
     }

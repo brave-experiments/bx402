@@ -11,7 +11,7 @@
 import { serve } from "@hono/node-server";
 import { Counter, Gauge, Histogram, openMetricsContentType, Registry } from "@prometheus-io/client";
 import { Hono, type MiddlewareHandler } from "hono";
-import { find } from "./endpoints.js";
+import { findEndpoint } from "./endpoints.js";
 import { log } from "./log.js";
 import { VERSION } from "./version.js";
 
@@ -273,7 +273,7 @@ export function endpointLabel(path: string): string {
   if (FREE_PATHS.has(path)) {
     return path;
   }
-  return find(path)?.path ?? OTHER;
+  return findEndpoint(path)?.path ?? OTHER;
 }
 
 /**

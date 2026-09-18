@@ -23,7 +23,7 @@ import { createClient, http } from "viem/tempo";
 import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 import type { MppConfig } from "./config.js";
 import type { Offer } from "./discovery.js";
-import { ENDPOINTS, find } from "./endpoints.js";
+import { ENDPOINTS, findEndpoint } from "./endpoints.js";
 import { AppError, jsonError } from "./error.js";
 import { log } from "./log.js";
 import { type Metrics, outcome, step } from "./metrics.js";
@@ -477,7 +477,7 @@ export async function handle(
   metrics.recordPayment(RAIL, endpoint, outcome.SETTLED);
   // The price comes from the catalog, so what we count as earned is what we
   // advertised rather than anything the payer said.
-  const sold = find(endpoint);
+  const sold = findEndpoint(endpoint);
   if (sold !== undefined) {
     metrics.recordCharge(RAIL, endpoint, sold.priceBaseUnits);
   }
