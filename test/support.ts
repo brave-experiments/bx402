@@ -251,7 +251,7 @@ export async function credentialHeader(payload: unknown): Promise<string> {
   if (advertised === undefined) {
     throw new Error("the challenge builds");
   }
-  const minted = Challenge.deserialize(advertised[1]);
+  const minted = Challenge.deserialize(advertised.value);
   return Credential.serialize(Credential.from({ challenge: minted, payload }));
 }
 

@@ -186,7 +186,7 @@ export async function client(rail: MppConfig, allowTestnet: boolean): Promise<Cl
 export async function challenge(
   client: Client,
   path: string,
-): Promise<[string, string] | undefined> {
+): Promise<{ name: string; value: string } | undefined> {
   // Advertise this endpoint's charge and no other. A client that is offered
   // every price at once could pay the cheapest and call the dearest.
   const charge = client.charges.get(path);
@@ -196,7 +196,7 @@ export async function challenge(
   }
   try {
     const minted = await client.handler.challenge.tempo.charge(charge);
-    return [CHALLENGE_HEADER, Challenge.serialize(minted)];
+    return { name: CHALLENGE_HEADER, value: Challenge.serialize(minted) };
   } catch {
     log.error("mpp challenge could not be built");
     return undefined;
