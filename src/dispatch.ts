@@ -203,8 +203,8 @@ export interface UriParts {
  * request with no host gets the bare path and query.
  */
 export function absoluteUriFrom(parts: UriParts): string {
-  const host = firstNonEmpty(parts.host, parts.uriAuthority);
-  if (host === undefined) {
+  const host = parts.host || parts.uriAuthority;
+  if (!host) {
     return parts.target;
   }
   const scheme = schemeOf(parts).toLowerCase();
@@ -231,20 +231,18 @@ export function absoluteUri(request: Request): string {
  */
 function schemeOf(parts: UriParts): string {
   const forwarded = parts.forwardedProto?.split(",")[0]?.trim();
-  return firstNonEmpty(forwarded, parts.uriScheme) ?? "http";
+  return forwarded || parts.uriScheme || "http";
 }
 
-/** Lowercase `host` and drop the port when it is the scheme's default. */
+/**
+ * Lowercase `host` and drop the port when it is the scheme's default, the way a
+ * URL parser normalizes an authority. A host a URL parser refuses passes
+ * through lowercased, as it always has.
+ */
 function normalizedHost(host: string, scheme: string): string {
-  const defaultPort = scheme === "http" ? ":80" : scheme === "https" ? ":443" : undefined;
-  if (defaultPort === undefined) {
+  try {
+    return new URL(`${scheme}://${host}`).host;
+  } catch {
     return host.toLowerCase();
   }
-  const bare = host.endsWith(defaultPort) ? host.slice(0, -defaultPort.length) : host;
-  return bare.toLowerCase();
-}
-
-/** The first of `values` that is present and not empty. */
-function firstNonEmpty(...values: (string | undefined)[]): string | undefined {
-  return values.find((value) => value !== undefined && value !== "");
 }

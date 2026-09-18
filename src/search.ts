@@ -81,37 +81,40 @@ export async function search(
 }
 
 /**
+ * Error names and codes meaning a deadline struck, whether while connecting,
+ * waiting for headers, or reading the body. `UND_ERR_ABORTED` counts because
+ * the only abort this module arms is its own deadline.
+ */
+const TIMEOUT_NAMES = new Set(["TimeoutError", "HeadersTimeoutError", "BodyTimeoutError"]);
+const TIMEOUT_CODES = new Set([
+  "UND_ERR_ABORTED",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+]);
+
+/** Codes meaning nothing answered at the other end: refused, unresolvable, or unreachable. */
+const CONNECT_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ECONNRESET",
+  "EPIPE",
+]);
+
+/**
  * The kind of failure behind an upstream error, as a label value. A fixed set,
  * so a failing upstream cannot grow the number of series.
  */
 function transportFailure(err: unknown): UpstreamFailure {
   const code = typeof err === "object" && err !== null && "code" in err ? String(err.code) : "";
   const name = err instanceof Error ? err.name : "";
-
-  // A deadline, whether it struck while connecting, waiting for headers, or
-  // reading the body.
-  if (
-    name === "TimeoutError" ||
-    // The only abort this code arms is the deadline above.
-    code === "UND_ERR_ABORTED" ||
-    name === "HeadersTimeoutError" ||
-    name === "BodyTimeoutError" ||
-    code === "UND_ERR_CONNECT_TIMEOUT" ||
-    code === "UND_ERR_HEADERS_TIMEOUT" ||
-    code === "UND_ERR_BODY_TIMEOUT"
-  ) {
+  if (TIMEOUT_NAMES.has(name) || TIMEOUT_CODES.has(code)) {
     return "timeout";
   }
-  // Nothing answered at the other end: refused, unresolvable, or unreachable.
-  if (
-    code === "ECONNREFUSED" ||
-    code === "ENOTFOUND" ||
-    code === "EAI_AGAIN" ||
-    code === "EHOSTUNREACH" ||
-    code === "ENETUNREACH" ||
-    code === "ECONNRESET" ||
-    code === "EPIPE"
-  ) {
+  if (CONNECT_CODES.has(code)) {
     return "connect";
   }
   return "transport";
