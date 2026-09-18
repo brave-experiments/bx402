@@ -316,7 +316,7 @@ export function serveMetrics(metrics: Metrics): Promise<never> {
     try {
       const exposition = await metrics.render();
       return c.body(exposition, 200, { "content-type": openMetricsContentType });
-    } catch (err: unknown) {
+    } catch (err) {
       log.error(`rendering metrics failed: ${describe(err)}`);
       return c.body(null, 500);
     }

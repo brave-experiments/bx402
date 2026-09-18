@@ -130,9 +130,7 @@ export interface Config {
  * - `ALLOW_TESTNET` (optional): `true` permits testnet networks, with each rail
  *   deciding what that admits.
  *
- * An absent required variable throws a missing-configuration error. The Rust
- * service also had an invalid-Unicode case per variable; Node hands every
- * environment variable over as a string, so that case cannot arise here.
+ * An absent required variable throws a missing-configuration error.
  */
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): Config {
   const braveSearchApiKey = requireVar(env, "BRAVE_SEARCH_API_KEY");
@@ -164,14 +162,13 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): Config {
 function x402FromEnv(env: NodeJS.ProcessEnv): X402Config {
   const apiKeyId = optionalVar(env, "CDP_API_KEY_ID");
   const apiKeySecret = optionalVar(env, "CDP_API_KEY_SECRET");
-  if ((apiKeyId === undefined) !== (apiKeySecret === undefined)) {
+  let cdp: X402Config["cdp"];
+  if (apiKeyId !== undefined && apiKeySecret !== undefined) {
+    cdp = { apiKeyId, apiKeySecret };
+  } else if (apiKeyId !== undefined || apiKeySecret !== undefined) {
     throw AppError.invalidConfig("CDP_API_KEY_ID and CDP_API_KEY_SECRET must be set together");
   }
-  return {
-    facilitatorUrl: requireVar(env, "X402_FACILITATOR_URL"),
-    cdp:
-      apiKeyId === undefined || apiKeySecret === undefined ? undefined : { apiKeyId, apiKeySecret },
-  };
+  return { facilitatorUrl: requireVar(env, "X402_FACILITATOR_URL"), cdp };
 }
 
 /** Read an optional environment variable, treating unset and empty alike. */

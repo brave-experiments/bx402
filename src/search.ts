@@ -59,7 +59,7 @@ export async function search(
       },
       signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
     });
-  } catch (err: unknown) {
+  } catch (err) {
     throw AppError.upstream(transportFailure(err));
   }
 
@@ -67,8 +67,7 @@ export async function search(
   try {
     body = Buffer.from(await response.body.arrayBuffer());
   } catch {
-    // A body that starts and then fails part way through, which the Rust client
-    // reported as a decode failure.
+    // A body that starts and then fails part way through is a decode failure.
     throw AppError.upstream("decode");
   }
 
