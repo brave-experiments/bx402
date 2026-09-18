@@ -45,6 +45,9 @@ const OTHER = "other";
  */
 const FREE_PATHS = new Set(["/health", "/openapi.json", "/llms.txt"]);
 
+/** The payment rails, as the `rail` label on every per-rail metric spells them. */
+export type RailLabel = "x402" | "mpp";
+
 /** Why a request was answered with a challenge instead of served. */
 export const challenge = {
   /** The request carried no payment proof at all. */
@@ -54,6 +57,9 @@ export const challenge = {
   /** The request carried proof for both rails at once. */
   COLLISION: "collision",
 } as const;
+
+/** One of the `challenge` reasons. */
+export type Challenge = (typeof challenge)[keyof typeof challenge];
 
 /**
  * How a payment ended: the complete set of outcomes, whichever rail reports
@@ -86,6 +92,9 @@ export const outcome = {
   UPSTREAM_FAILED: "upstream_failed",
 } as const;
 
+/** One of the `outcome` values. */
+export type Outcome = (typeof outcome)[keyof typeof outcome];
+
 /**
  * What a screen decided.
  *
@@ -106,6 +115,9 @@ export const screening = {
   ERROR: "error",
 } as const;
 
+/** One of the `screening` decisions. */
+export type Screening = (typeof screening)[keyof typeof screening];
+
 /**
  * The steps of a payment worth timing separately. Which steps a rail reports
  * depends on whether it can check a payment without moving money.
@@ -118,6 +130,9 @@ export const step = {
   /** Checking and moving in one call, where the rail offers no dry run. */
   CHARGE: "charge",
 } as const;
+
+/** One of the `step` names. */
+export type Step = (typeof step)[keyof typeof step];
 
 /**
  * Everything the service records, and the registry that renders it.
@@ -215,23 +230,23 @@ export class Metrics {
   }
 
   /** Record what one address screen decided. */
-  recordScreening(outcomeLabel: string): void {
-    this.screenings.inc({ outcome: outcomeLabel });
+  recordScreening(decided: Screening): void {
+    this.screenings.inc({ outcome: decided });
   }
 
   /** Record one challenge the service issued instead of serving the request. */
-  recordChallenge(endpoint: string, reason: string): void {
+  recordChallenge(endpoint: string, reason: Challenge): void {
     this.challenges.inc({ endpoint, reason });
   }
 
   /** Record how one payment ended. */
-  recordPayment(rail: string, endpoint: string, outcomeLabel: string): void {
-    this.payments.inc({ rail, endpoint, outcome: outcomeLabel });
+  recordPayment(rail: RailLabel, endpoint: string, ended: Outcome): void {
+    this.payments.inc({ rail, endpoint, outcome: ended });
   }
 
   /** Record how long one step of a payment took. */
-  recordPaymentStep(rail: string, stepLabel: string, seconds: number): void {
-    this.paymentStepDuration.observe({ rail, step: stepLabel }, seconds);
+  recordPaymentStep(rail: RailLabel, timed: Step, seconds: number): void {
+    this.paymentStepDuration.observe({ rail, step: timed }, seconds);
   }
 
   /**
@@ -239,7 +254,7 @@ export class Metrics {
    * Read from the catalog, so it is the price we advertised rather than anything
    * the payer stated.
    */
-  recordCharge(rail: string, endpoint: string, baseUnits: number): void {
+  recordCharge(rail: RailLabel, endpoint: string, baseUnits: number): void {
     this.chargedBaseUnits.inc({ rail, endpoint }, baseUnits);
   }
 
