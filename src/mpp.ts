@@ -226,17 +226,18 @@ function buildHandler(rail: MppConfig, chain: Chain) {
  * straight into `amount` would overcharge by a factor of a million.
  */
 function charges(chainId: number): Map<string, Charge> {
-  const table = new Map<string, Charge>();
-  for (const endpoint of ENDPOINTS) {
-    table.set(endpoint.path, {
-      amount: formatUnits(BigInt(endpoint.priceBaseUnits), CURRENCY_DECIMALS),
-      chainId,
-      currency: PATH_USD,
-      decimals: CURRENCY_DECIMALS,
-      recipient: PAY_TO_EVM,
-    });
-  }
-  return table;
+  return new Map<string, Charge>(
+    ENDPOINTS.map((endpoint) => [
+      endpoint.path,
+      {
+        amount: formatUnits(BigInt(endpoint.priceBaseUnits), CURRENCY_DECIMALS),
+        chainId,
+        currency: PATH_USD,
+        decimals: CURRENCY_DECIMALS,
+        recipient: PAY_TO_EVM,
+      },
+    ]),
+  );
 }
 
 /**

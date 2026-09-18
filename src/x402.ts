@@ -107,27 +107,27 @@ export function hasPayment(headers: Headers): boolean {
  */
 export function accepts(allowTestnet: boolean): Map<string, PaymentRequirements[]> {
   const networks = NETWORKS.filter((network) => allowTestnet || !network.testnet);
-  const table = new Map<string, PaymentRequirements[]>();
-  for (const endpoint of ENDPOINTS) {
-    const offers = networks.map(({ caip2 }) => {
-      const asset = getDefaultAsset(caip2);
-      return {
-        scheme: "exact",
-        network: caip2,
-        amount: String(endpoint.priceBaseUnits),
-        asset: asset.asset,
-        payTo: PAY_TO_EVM,
-        maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
-        extra: {
-          assetTransferMethod: ASSET_TRANSFER_METHOD,
-          name: asset.name,
-          version: asset.version,
-        },
-      } as PaymentRequirements;
-    });
-    table.set(endpoint.path, offers);
-  }
-  return table;
+  return new Map<string, PaymentRequirements[]>(
+    ENDPOINTS.map((endpoint) => [
+      endpoint.path,
+      networks.map(({ caip2 }) => {
+        const asset = getDefaultAsset(caip2);
+        return {
+          scheme: "exact",
+          network: caip2,
+          amount: String(endpoint.priceBaseUnits),
+          asset: asset.asset,
+          payTo: PAY_TO_EVM,
+          maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+          extra: {
+            assetTransferMethod: ASSET_TRANSFER_METHOD,
+            name: asset.name,
+            version: asset.version,
+          },
+        } as PaymentRequirements;
+      }),
+    ]),
+  );
 }
 
 /**
