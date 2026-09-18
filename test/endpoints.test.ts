@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ENDPOINTS, find, UTILITY_RATE } from "../src/endpoints.js";
+import { ENDPOINTS, findEndpoint, UTILITY_RATE } from "../src/endpoints.js";
 
 describe("endpoints", () => {
   it("every_path_is_listed_once", () => {
@@ -15,11 +15,11 @@ describe("endpoints", () => {
   });
 
   it("find_matches_a_served_path_exactly", () => {
-    const found = find("/res/v1/images/search");
+    const found = findEndpoint("/res/v1/images/search");
     expect(found?.priceBaseUnits).toBe(5_000);
 
     // The Answers API is not sold, and a prefix of a served path is not a served path.
-    expect(find("/res/v1/chat/completions")).toBeUndefined();
-    expect(find("/res/v1/images")).toBeUndefined();
+    expect(findEndpoint("/res/v1/chat/completions")).toBeUndefined();
+    expect(findEndpoint("/res/v1/images")).toBeUndefined();
   });
 });

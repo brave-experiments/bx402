@@ -16,7 +16,7 @@ import { base, baseSepolia } from "viem/chains";
 import { ClaimStore } from "./claims.js";
 import type { X402Config } from "./config.js";
 import type { Offer } from "./discovery.js";
-import { ENDPOINTS, find } from "./endpoints.js";
+import { ENDPOINTS, findEndpoint } from "./endpoints.js";
 import { AppError, describe, isRecord, jsonError } from "./error.js";
 import { log } from "./log.js";
 import { type Metrics, type Outcome, outcome, seconds, step } from "./metrics.js";
@@ -107,27 +107,27 @@ export function hasPayment(headers: Headers): boolean {
  */
 export function accepts(allowTestnet: boolean): Map<string, PaymentRequirements[]> {
   const networks = NETWORKS.filter((network) => allowTestnet || !network.testnet);
-  const table = new Map<string, PaymentRequirements[]>();
-  for (const endpoint of ENDPOINTS) {
-    const offers = networks.map(({ caip2 }) => {
-      const asset = getDefaultAsset(caip2);
-      return {
-        scheme: "exact",
-        network: caip2,
-        amount: String(endpoint.priceBaseUnits),
-        asset: asset.asset,
-        payTo: PAY_TO_EVM,
-        maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
-        extra: {
-          assetTransferMethod: ASSET_TRANSFER_METHOD,
-          name: asset.name,
-          version: asset.version,
-        },
-      } as PaymentRequirements;
-    });
-    table.set(endpoint.path, offers);
-  }
-  return table;
+  return new Map<string, PaymentRequirements[]>(
+    ENDPOINTS.map((endpoint) => [
+      endpoint.path,
+      networks.map(({ caip2 }) => {
+        const asset = getDefaultAsset(caip2);
+        return {
+          scheme: "exact",
+          network: caip2,
+          amount: String(endpoint.priceBaseUnits),
+          asset: asset.asset,
+          payTo: PAY_TO_EVM,
+          maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+          extra: {
+            assetTransferMethod: ASSET_TRANSFER_METHOD,
+            name: asset.name,
+            version: asset.version,
+          },
+        } as PaymentRequirements;
+      }),
+    ]),
+  );
 }
 
 /**
@@ -225,7 +225,7 @@ export function challenge(
   const path = pathOf(resource);
   // Advertise this endpoint's price and no other. A client that is offered every
   // price at once could pay the cheapest and call the dearest.
-  const endpoint = find(path);
+  const endpoint = findEndpoint(path);
   const offers = client.accepts.get(path);
   if (endpoint === undefined || offers === undefined) {
     log.error(`no x402 offer for a paid path: ${path}`);
@@ -398,7 +398,7 @@ export async function handle(
     metrics.recordPayment(RAIL, endpoint, outcome.SETTLED);
     // The price comes from the catalog, so what we count as earned is what we
     // advertised rather than anything the payer said.
-    const sold = find(endpoint);
+    const sold = findEndpoint(endpoint);
     if (sold !== undefined) {
       metrics.recordCharge(RAIL, endpoint, sold.priceBaseUnits);
     }

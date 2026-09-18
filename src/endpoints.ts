@@ -99,7 +99,10 @@ export const ENDPOINTS: readonly Endpoint[] = [
   },
 ];
 
+/** The catalog keyed by path, for the per-request lookups. */
+const BY_PATH = new Map<string, Endpoint>(ENDPOINTS.map((endpoint) => [endpoint.path, endpoint]));
+
 /** The endpoint served at `path`, or `undefined` for a path we do not sell. */
-export function find(path: string): Endpoint | undefined {
-  return ENDPOINTS.find((endpoint) => endpoint.path === path);
+export function findEndpoint(path: string): Endpoint | undefined {
+  return BY_PATH.get(path);
 }

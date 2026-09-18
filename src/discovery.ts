@@ -91,10 +91,9 @@ export interface DiscoveryDocument {
  * so paths stay relative to wherever the document was fetched from.
  */
 export function document(ctx: Context): DiscoveryDocument {
-  const paths: Record<string, { get: Operation }> = {};
-  for (const endpoint of ENDPOINTS) {
-    paths[endpoint.path] = { get: operation(ctx, endpoint) };
-  }
+  const paths = Object.fromEntries(
+    ENDPOINTS.map((endpoint) => [endpoint.path, { get: operation(ctx, endpoint) }]),
+  );
   return {
     openapi: "3.1.0",
     // The build version stands in for the API version, so a release bumps

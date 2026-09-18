@@ -23,7 +23,7 @@ import { createClient, http } from "viem/tempo";
 import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 import type { MppConfig } from "./config.js";
 import type { Offer } from "./discovery.js";
-import { ENDPOINTS, find } from "./endpoints.js";
+import { ENDPOINTS, findEndpoint } from "./endpoints.js";
 import { AppError, describe, isRecord, jsonError } from "./error.js";
 import { log } from "./log.js";
 import { type Metrics, type Outcome, outcome, seconds, step } from "./metrics.js";
@@ -226,17 +226,18 @@ function buildHandler(rail: MppConfig, chain: Chain) {
  * straight into `amount` would overcharge by a factor of a million.
  */
 function charges(chainId: number): Map<string, Charge> {
-  const table = new Map<string, Charge>();
-  for (const endpoint of ENDPOINTS) {
-    table.set(endpoint.path, {
-      amount: formatUnits(BigInt(endpoint.priceBaseUnits), CURRENCY_DECIMALS),
-      chainId,
-      currency: PATH_USD,
-      decimals: CURRENCY_DECIMALS,
-      recipient: PAY_TO_EVM,
-    });
-  }
-  return table;
+  return new Map<string, Charge>(
+    ENDPOINTS.map((endpoint) => [
+      endpoint.path,
+      {
+        amount: formatUnits(BigInt(endpoint.priceBaseUnits), CURRENCY_DECIMALS),
+        chainId,
+        currency: PATH_USD,
+        decimals: CURRENCY_DECIMALS,
+        recipient: PAY_TO_EVM,
+      },
+    ]),
+  );
 }
 
 /**
@@ -477,7 +478,7 @@ export async function handle(
   metrics.recordPayment(RAIL, endpoint, outcome.SETTLED);
   // The price comes from the catalog, so what we count as earned is what we
   // advertised rather than anything the payer said.
-  const sold = find(endpoint);
+  const sold = findEndpoint(endpoint);
   if (sold !== undefined) {
     metrics.recordCharge(RAIL, endpoint, sold.priceBaseUnits);
   }
