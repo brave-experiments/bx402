@@ -276,19 +276,15 @@ export function endpointLabel(path: string): string {
   return findEndpoint(path)?.path ?? OTHER;
 }
 
+/** The methods served, and so the only method labels a caller can mint. */
+const METHOD_LABELS = new Set(["GET", "POST", "HEAD"]);
+
 /**
  * The label for a request method. Anything the service does not serve collapses
  * to one value, since the method is caller-supplied and otherwise unbounded.
  */
 function methodLabel(method: string): string {
-  switch (method) {
-    case "GET":
-    case "POST":
-    case "HEAD":
-      return method;
-    default:
-      return OTHER;
-  }
+  return METHOD_LABELS.has(method) ? method : OTHER;
 }
 
 /** Count and time every request, including those matching no route. */
