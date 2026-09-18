@@ -34,23 +34,15 @@ export function parseEnabledRails(value: string): EnabledRails {
   if (trimmed === "none") {
     return { x402: false, mpp: false };
   }
-  const rails: EnabledRails = { x402: false, mpp: false };
-  for (const token of trimmed.split(",")) {
-    switch (token.trim()) {
-      case "x402":
-        rails.x402 = true;
-        break;
-      case "mpp":
-        rails.mpp = true;
-        break;
-      default:
-        throw AppError.invalidConfig(
-          `ENABLED_RAILS: unknown rail ${JSON.stringify(token.trim())}, ` +
-            "expected none or a comma-separated subset of x402,mpp",
-        );
-    }
+  const names = trimmed.split(",").map((token) => token.trim());
+  const unknown = names.find((name) => name !== "x402" && name !== "mpp");
+  if (unknown !== undefined) {
+    throw AppError.invalidConfig(
+      `ENABLED_RAILS: unknown rail ${JSON.stringify(unknown)}, ` +
+        "expected none or a comma-separated subset of x402,mpp",
+    );
   }
-  return rails;
+  return { x402: names.includes("x402"), mpp: names.includes("mpp") };
 }
 
 /** Settings for the x402 rail. */
