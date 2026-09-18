@@ -19,6 +19,7 @@ import type { Config } from "./config.js";
 import { AppError, emptyBody } from "./error.js";
 import { challenge, endpointLabel, type Metrics } from "./metrics.js";
 import * as mpp from "./mpp.js";
+import { detect } from "./rails.js";
 import type { RestrictedAddressScreener } from "./screener.js";
 import * as x402 from "./x402.js";
 
@@ -41,15 +42,11 @@ export type Rail =
  * headers itself; it asks each rail module whether its proof is present.
  */
 export function classify(headers: Headers): Rail {
-  const hasX402 = x402.hasPayment(headers);
-  const hasMpp = mpp.hasCredential(headers);
-  if (hasX402 && hasMpp) {
+  const attempted = detect(headers);
+  if (attempted.length > 1) {
     return "both";
   }
-  if (hasX402) {
-    return "x402";
-  }
-  return hasMpp ? "mpp" : "none";
+  return attempted[0] ?? "none";
 }
 
 /**
