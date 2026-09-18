@@ -132,6 +132,14 @@ export function emptyBody(status: number, headers?: Headers | Record<string, str
   return new Response(null, { status, headers: stated });
 }
 
+/** The message and cause chain of a failure, for one log line. */
+export function describe(err: unknown): string {
+  if (!(err instanceof Error)) {
+    return String(err);
+  }
+  return err.cause === undefined ? err.message : `${err.message}: ${describe(err.cause)}`;
+}
+
 /** A generic `503` for a payer that could not be screened, identical on every rail. */
 export function serviceUnavailable(): Response {
   return jsonError(503, "service temporarily unavailable");

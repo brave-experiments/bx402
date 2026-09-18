@@ -12,6 +12,7 @@ import { serve } from "@hono/node-server";
 import { Counter, Gauge, Histogram, openMetricsContentType, Registry } from "@prometheus-io/client";
 import { Hono, type MiddlewareHandler } from "hono";
 import { find } from "./endpoints.js";
+import { describe } from "./error.js";
 import { log } from "./log.js";
 import { VERSION } from "./version.js";
 
@@ -38,6 +39,11 @@ const DURATION_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 8, 15, 30];
  * set we serve, so a request cannot mint a series of its own.
  */
 const OTHER = "other";
+
+/** Elapsed seconds since `started`, the unit every duration metric records. */
+export function seconds(started: number): number {
+  return (performance.now() - started) / 1000;
+}
 
 /**
  * The free routes, each counted under its own path. The literals are repeated
@@ -294,7 +300,7 @@ export function measure(metrics: Metrics): MiddlewareHandler {
     const method = methodLabel(c.req.method);
     const started = performance.now();
     await next();
-    metrics.recordRequest(endpoint, method, c.res.status, (performance.now() - started) / 1000);
+    metrics.recordRequest(endpoint, method, c.res.status, seconds(started));
   };
 }
 
@@ -311,7 +317,7 @@ export function serveMetrics(metrics: Metrics): Promise<never> {
       const exposition = await metrics.render();
       return c.body(exposition, 200, { "content-type": openMetricsContentType });
     } catch (err: unknown) {
-      log.error(`rendering metrics failed: ${err instanceof Error ? err.message : String(err)}`);
+      log.error(`rendering metrics failed: ${describe(err)}`);
       return c.body(null, 500);
     }
   });
