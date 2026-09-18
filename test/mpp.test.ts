@@ -85,9 +85,9 @@ describe("mpp", () => {
   it("challenge_advertises_the_charge_credentials_answer", async () => {
     const built = await clientOn(testConfig(), MODERATO);
     const advertised = await challenge(built, WEB_SEARCH_PATH);
-    expect(advertised?.[0]).toBe("www-authenticate");
+    expect(advertised?.name).toBe("www-authenticate");
 
-    const parsed = Challenge.deserialize(advertised?.[1] as string);
+    const parsed = Challenge.deserialize(advertised?.value as string);
     expect(parsed.realm).toBe("bx402");
     expect(parsed.method).toBe("tempo");
     expect(parsed.intent).toBe("charge");
@@ -237,7 +237,7 @@ describe("mpp", () => {
     const { transaction } = forgedTransaction();
     const built = await clientOn(testConfig(), MODERATO);
     const advertised = await challenge(built, WEB_SEARCH_PATH);
-    const minted = Challenge.deserialize(advertised?.[1] as string);
+    const minted = Challenge.deserialize(advertised?.value as string);
     return new Headers({
       authorization: Credential.serialize(
         Credential.from({

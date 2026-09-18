@@ -112,7 +112,7 @@ export async function cold402(
   ];
   for (const entry of challenges) {
     if (entry !== undefined) {
-      headers.set(entry[0], entry[1]);
+      headers.set(entry.name, entry.value);
     }
   }
   return emptyBody(402, headers);

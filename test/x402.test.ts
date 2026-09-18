@@ -311,7 +311,7 @@ describe("x402", () => {
     );
     const entry = challenge(built, "https://bx402.example.com/res/v1/web/search?q=rust", "GET");
     expect(entry).toBeDefined();
-    const [name, value] = entry as [string, string];
+    const { name, value } = entry as { name: string; value: string };
     expect(name).toBe(PAYMENT_REQUIRED_HEADER);
 
     expect(decodeChallenge(value)).toEqual({

@@ -223,7 +223,7 @@ export function challenge(
   client: Client,
   resource: string,
   method: string,
-): [string, string] | undefined {
+): { name: string; value: string } | undefined {
   const path = pathOf(resource);
   // Advertise this endpoint's price and no other. A client that is offered every
   // price at once could pay the cheapest and call the dearest.
@@ -245,7 +245,7 @@ export function challenge(
     extensions: routeExtensions(method),
   };
   try {
-    return [PAYMENT_REQUIRED_HEADER, encodePaymentRequiredHeader(envelope)];
+    return { name: PAYMENT_REQUIRED_HEADER, value: encodePaymentRequiredHeader(envelope) };
   } catch {
     log.error("x402 challenge could not be encoded as a header");
     return undefined;
