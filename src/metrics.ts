@@ -142,91 +142,76 @@ export type Step = (typeof step)[keyof typeof step];
  * it, rather than sharing a global the whole process sees.
  */
 export class Metrics {
-  private readonly registry: Registry;
-  private readonly requests: Counter<"endpoint" | "method" | "status">;
-  private readonly requestDuration: Histogram<"endpoint" | "method">;
-  private readonly upstreamRequests: Counter<"endpoint" | "status">;
-  private readonly upstreamDuration: Histogram<"endpoint">;
-  private readonly challenges: Counter<"endpoint" | "reason">;
-  private readonly payments: Counter<"rail" | "endpoint" | "outcome">;
-  private readonly paymentStepDuration: Histogram<"rail" | "step">;
-  private readonly chargedBaseUnits: Counter<"rail" | "endpoint">;
-  private readonly screenings: Counter<"outcome">;
+  // Each metric registers itself here as its initializer runs, so declaring a
+  // field is all it takes to register it. Names carry the `bx402` prefix, and
+  // the encoder appends `_total` to counters as OpenMetrics requires.
+  private readonly registry = new Registry();
+  private readonly requests = new Counter({
+    name: "bx402_http_requests",
+    help: "Requests answered, by endpoint and status.",
+    labelNames: ["endpoint", "method", "status"],
+    registers: [this.registry],
+  });
+  private readonly requestDuration = new Histogram({
+    name: "bx402_http_request_duration_seconds",
+    help: "Time to answer a request, payment included.",
+    labelNames: ["endpoint", "method"],
+    buckets: DURATION_BUCKETS,
+    registers: [this.registry],
+  });
+  private readonly upstreamRequests = new Counter({
+    name: "bx402_upstream_requests",
+    help: "Calls to the Brave Search API, by endpoint and outcome.",
+    labelNames: ["endpoint", "status"],
+    registers: [this.registry],
+  });
+  private readonly upstreamDuration = new Histogram({
+    name: "bx402_upstream_duration_seconds",
+    help: "Time for one Brave Search API call, response body included.",
+    labelNames: ["endpoint"],
+    buckets: DURATION_BUCKETS,
+    registers: [this.registry],
+  });
+  private readonly challenges = new Counter({
+    name: "bx402_challenges",
+    help: "Payment challenges issued, by endpoint and reason.",
+    labelNames: ["endpoint", "reason"],
+    registers: [this.registry],
+  });
+  private readonly payments = new Counter({
+    name: "bx402_payments",
+    help: "Payments attempted, by rail, endpoint and how they ended.",
+    labelNames: ["rail", "endpoint", "outcome"],
+    registers: [this.registry],
+  });
+  private readonly paymentStepDuration = new Histogram({
+    name: "bx402_payment_step_duration_seconds",
+    help: "Time for one step of a payment, by rail.",
+    labelNames: ["rail", "step"],
+    buckets: DURATION_BUCKETS,
+    registers: [this.registry],
+  });
+  private readonly chargedBaseUnits = new Counter({
+    name: "bx402_charged_base_units",
+    help: "Base units of currency charged for settled payments.",
+    labelNames: ["rail", "endpoint"],
+    registers: [this.registry],
+  });
+  private readonly screenings = new Counter({
+    name: "bx402_screenings",
+    help: "Address screens performed, by what they decided.",
+    labelNames: ["outcome"],
+    registers: [this.registry],
+  });
 
-  /**
-   * Build the registry and register every metric. Names carry the `bx402`
-   * prefix, and the encoder appends `_total` to counters as OpenMetrics
-   * requires.
-   */
   constructor() {
-    this.registry = new Registry();
     this.registry.setContentType(openMetricsContentType);
-    const registers = [this.registry];
-
     new Gauge({
       name: "bx402_build_info",
       help: "Version of the running service.",
       labelNames: ["version"],
-      registers,
+      registers: [this.registry],
     }).set({ version: VERSION }, 1);
-
-    this.requests = new Counter<"endpoint" | "method" | "status">({
-      name: "bx402_http_requests",
-      help: "Requests answered, by endpoint and status.",
-      labelNames: ["endpoint", "method", "status"],
-      registers,
-    });
-    this.requestDuration = new Histogram<"endpoint" | "method">({
-      name: "bx402_http_request_duration_seconds",
-      help: "Time to answer a request, payment included.",
-      labelNames: ["endpoint", "method"],
-      buckets: DURATION_BUCKETS,
-      registers,
-    });
-    this.upstreamRequests = new Counter<"endpoint" | "status">({
-      name: "bx402_upstream_requests",
-      help: "Calls to the Brave Search API, by endpoint and outcome.",
-      labelNames: ["endpoint", "status"],
-      registers,
-    });
-    this.upstreamDuration = new Histogram<"endpoint">({
-      name: "bx402_upstream_duration_seconds",
-      help: "Time for one Brave Search API call, response body included.",
-      labelNames: ["endpoint"],
-      buckets: DURATION_BUCKETS,
-      registers,
-    });
-    this.challenges = new Counter<"endpoint" | "reason">({
-      name: "bx402_challenges",
-      help: "Payment challenges issued, by endpoint and reason.",
-      labelNames: ["endpoint", "reason"],
-      registers,
-    });
-    this.payments = new Counter<"rail" | "endpoint" | "outcome">({
-      name: "bx402_payments",
-      help: "Payments attempted, by rail, endpoint and how they ended.",
-      labelNames: ["rail", "endpoint", "outcome"],
-      registers,
-    });
-    this.paymentStepDuration = new Histogram<"rail" | "step">({
-      name: "bx402_payment_step_duration_seconds",
-      help: "Time for one step of a payment, by rail.",
-      labelNames: ["rail", "step"],
-      buckets: DURATION_BUCKETS,
-      registers,
-    });
-    this.chargedBaseUnits = new Counter<"rail" | "endpoint">({
-      name: "bx402_charged_base_units",
-      help: "Base units of currency charged for settled payments.",
-      labelNames: ["rail", "endpoint"],
-      registers,
-    });
-    this.screenings = new Counter<"outcome">({
-      name: "bx402_screenings",
-      help: "Address screens performed, by what they decided.",
-      labelNames: ["outcome"],
-      registers,
-    });
   }
 
   /** Record what one address screen decided. */
