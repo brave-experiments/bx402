@@ -28,52 +28,76 @@ export type AppErrorKind =
 
 /**
  * One error per failure mode the caller treats differently, not per cause. Each
- * kind maps to a single HTTP status in `toResponse`, so handlers can throw and
- * let one catch site turn the error into a response.
+ * factory fixes the HTTP status and the client-visible detail, so handlers can
+ * throw and let one catch site turn the error into a response.
  */
 export class AppError extends Error {
   readonly kind: AppErrorKind;
+  /** The HTTP status `toResponse` answers with. */
+  readonly status: number;
+  /** The client-visible wording `toResponse` carries. */
+  readonly detail: string;
   /** Set only on an upstream error, naming what went wrong on the wire. */
   readonly failure: UpstreamFailure | undefined;
 
-  private constructor(kind: AppErrorKind, message: string, failure?: UpstreamFailure) {
+  private constructor(
+    kind: AppErrorKind,
+    message: string,
+    status: number,
+    detail: string,
+    failure?: UpstreamFailure,
+  ) {
     super(message);
     this.name = "AppError";
     this.kind = kind;
+    this.status = status;
+    this.detail = detail;
     this.failure = failure;
   }
 
   static upstream(failure: UpstreamFailure): AppError {
-    return new AppError("upstream", "upstream Brave Search API call failed", failure);
+    return new AppError(
+      "upstream",
+      "upstream Brave Search API call failed",
+      502,
+      "upstream error",
+      failure,
+    );
   }
 
   static badRequest(detail: string): AppError {
-    return new AppError("badRequest", `invalid request: ${detail}`);
+    return new AppError("badRequest", `invalid request: ${detail}`, 400, detail);
   }
 
   static missingConfig(name: string): AppError {
-    return new AppError("missingConfig", `missing required configuration: ${name}`);
+    return new AppError(
+      "missingConfig",
+      `missing required configuration: ${name}`,
+      500,
+      "server misconfigured",
+    );
   }
 
   static invalidConfig(detail: string): AppError {
-    return new AppError("invalidConfig", `invalid configuration: ${detail}`);
+    return new AppError(
+      "invalidConfig",
+      `invalid configuration: ${detail}`,
+      500,
+      "server misconfigured",
+    );
+  }
+
+  /** Narrows an upstream error, whose `failure` field is always set. */
+  isUpstream(): this is AppError & { failure: UpstreamFailure } {
+    return this.kind === "upstream";
   }
 
   /**
-   * The response a client sees. Only the mapped message crosses the wire; the
+   * The response a client sees. Only the fixed detail crosses the wire; the
    * full error is left for the caller to log.
    */
   toResponse(): Response {
-    switch (this.kind) {
-      case "upstream":
-        return jsonError(502, "upstream error");
-      case "badRequest":
-        // The detail is the part after the prefix the constructor added.
-        return jsonError(400, this.message.slice("invalid request: ".length));
-      case "missingConfig":
-      case "invalidConfig":
-        return jsonError(500, "server misconfigured");
-    }
+    return jsonError(this.status, this.detail);
   }
 }
 

@@ -136,7 +136,7 @@ async function proxy(
         : new Uint8Array(upstream.body);
     return new Response(body, { status: upstream.status, headers });
   } catch (err: unknown) {
-    if (err instanceof AppError && err.failure !== undefined) {
+    if (err instanceof AppError && err.isUpstream()) {
       // No response arrived, so the failure stands in for a status.
       metrics.recordUpstream(endpoint, err.failure, seconds(started));
       return err.toResponse();
