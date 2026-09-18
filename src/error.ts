@@ -1,6 +1,16 @@
 /**
- * Typed application errors, and the response shapes every module answers with.
+ * Typed application errors, the response shapes every module answers with, and
+ * the narrowing guard for reading values whose shape the sender controls.
  */
+
+/**
+ * Narrows a decoded JSON value to an object whose fields can be read. Arrays
+ * pass like any other object; a caller's checks on the fields it reads are
+ * what refuse them.
+ */
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
 
 /**
  * The kind of failure behind an upstream error. A fixed set, so a failing

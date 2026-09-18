@@ -150,15 +150,8 @@ export class RestrictedAddressScreener {
 
 /** Whether an S3 failure is the definite "no such key" answer. */
 function isNotFound(err: unknown): boolean {
-  if (typeof err !== "object" || err === null) {
-    return false;
-  }
-  const name = "name" in err ? err.name : undefined;
-  const status =
-    "$metadata" in err && typeof err.$metadata === "object" && err.$metadata !== null
-      ? (err.$metadata as { httpStatusCode?: number }).httpStatusCode
-      : undefined;
-  return name === "NotFound" || status === 404;
+  const failure = err as { name?: unknown; $metadata?: { httpStatusCode?: unknown } } | undefined;
+  return failure?.name === "NotFound" || failure?.$metadata?.httpStatusCode === 404;
 }
 
 /** The message and cause chain of a failure, for one log line. */

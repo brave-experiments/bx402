@@ -24,7 +24,7 @@ import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 import type { MppConfig } from "./config.js";
 import type { Offer } from "./discovery.js";
 import { ENDPOINTS, find } from "./endpoints.js";
-import { AppError, jsonError } from "./error.js";
+import { AppError, isRecord, jsonError } from "./error.js";
 import { log } from "./log.js";
 import { type Metrics, type Outcome, outcome, step } from "./metrics.js";
 import type { RestrictedAddressScreener } from "./screener.js";
@@ -359,11 +359,11 @@ export function credential(headers: Headers): Credential.Credential | undefined 
  * proof, which authorizes nothing to move.
  */
 export function transactionPayload(parsed: Credential.Credential): TransactionPayload | undefined {
-  const payload = parsed.payload;
-  if (typeof payload !== "object" || payload === null) {
+  const { payload } = parsed;
+  if (!isRecord(payload)) {
     return undefined;
   }
-  const { type, signature } = payload as { type?: unknown; signature?: unknown };
+  const { type, signature } = payload;
   if (type !== "transaction" || typeof signature !== "string") {
     return undefined;
   }

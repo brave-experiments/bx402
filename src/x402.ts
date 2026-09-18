@@ -17,7 +17,7 @@ import { ClaimStore } from "./claims.js";
 import type { X402Config } from "./config.js";
 import type { Offer } from "./discovery.js";
 import { ENDPOINTS, find } from "./endpoints.js";
-import { AppError, jsonError } from "./error.js";
+import { AppError, isRecord, jsonError } from "./error.js";
 import { log } from "./log.js";
 import { type Metrics, type Outcome, outcome, step } from "./metrics.js";
 import type { RestrictedAddressScreener } from "./screener.js";
@@ -446,28 +446,28 @@ export function decodePayment(headers: Headers):
   if (header === null) {
     return undefined;
   }
-  let payload: Record<string, unknown>;
+  let payload: unknown;
   try {
     payload = JSON.parse(Buffer.from(header, "base64").toString("utf8"));
   } catch {
     return undefined;
   }
-  if (typeof payload !== "object" || payload === null) {
+  if (!isRecord(payload)) {
     return undefined;
   }
-  const accepted = payload.accepted;
-  if (typeof accepted !== "object" || accepted === null) {
+  const { accepted } = payload;
+  if (!isRecord(accepted)) {
     return undefined;
   }
   const scheme = payload.payload;
-  if (typeof scheme !== "object" || scheme === null) {
+  if (!isRecord(scheme)) {
     return undefined;
   }
-  const authorization = (scheme as Record<string, unknown>).authorization;
-  if (typeof authorization !== "object" || authorization === null) {
+  const { authorization } = scheme;
+  if (!isRecord(authorization)) {
     return undefined;
   }
-  const { from, nonce } = authorization as Record<string, unknown>;
+  const { from, nonce } = authorization;
   if (typeof from !== "string" || !EVM_ADDRESS.test(from)) {
     return undefined;
   }
@@ -478,12 +478,12 @@ export function decodePayment(headers: Headers):
   // A vacant URL is the shape the SDK itself treats as "no resource", so the
   // field is blanked rather than dropped: any facilitator that expects the key
   // still finds it, holding nothing.
-  const resource = (payload as { resource?: { url?: unknown } }).resource;
-  if (typeof resource === "object" && resource !== null && typeof resource.url === "string") {
+  const { resource } = payload;
+  if (isRecord(resource) && typeof resource.url === "string") {
     resource.url = "";
   }
   return {
-    payload: payload as unknown as PaymentPayload,
+    payload: payload as PaymentPayload,
     accepted: accepted as PaymentRequirements,
     payer,
     claim: {
