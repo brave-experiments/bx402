@@ -87,6 +87,11 @@ export class AppError extends Error {
     );
   }
 
+  /** Narrows an upstream error, whose `failure` field is always set. */
+  isUpstream(): this is AppError & { failure: UpstreamFailure } {
+    return this.kind === "upstream";
+  }
+
   /**
    * The response a client sees. Only the fixed detail crosses the wire; the
    * full error is left for the caller to log.
