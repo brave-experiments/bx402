@@ -1,11 +1,14 @@
 import { generateKeyPairSync } from "node:crypto";
+import type { HTTPFacilitatorClient } from "@x402/core/server";
 import type { PaymentPayload } from "@x402/core/types";
 import { afterEach, describe, expect, it } from "vitest";
+import { Metrics } from "../src/metrics.js";
 import {
   accepts,
   challenge,
   client,
   decodePayment,
+  handle,
   offers,
   PAYMENT_REQUIRED_HEADER,
 } from "../src/x402.js";
@@ -161,6 +164,90 @@ describe("x402", () => {
     const window = (entries[0]?.maxTimeoutSeconds ?? 0) * 1000;
     expect(decoded?.claim.expires).toBeGreaterThan(Date.now() + window - 5_000);
     expect(decoded?.claim.expires).toBeLessThanOrEqual(Date.now() + window);
+  });
+
+  it("decode_blanks_the_resource_url_the_client_echoed", () => {
+    // What was searched is the payer's business. The facilitator verifies the
+    // signature and the requirements, neither of which names the resource, so
+    // the URL we relay leaves vacant instead of crossing to Coinbase.
+    const entries = offersFor(true, "/res/v1/web/search");
+    const decoded = decodePayment(
+      paymentHeaders({
+        x402Version: 2,
+        resource: {
+          url: "https://bx402.example.com/res/v1/web/search?q=private",
+          description: "Brave Search API - Web / Search",
+        },
+        accepted: entries[0],
+        payload: { authorization: AUTHORIZATION },
+      }),
+    );
+    if (decoded === undefined) {
+      throw new Error("the payment decodes");
+    }
+    const resource = (decoded.payload as { resource?: { url?: string; description?: string } })
+      .resource;
+    expect(resource?.url).toBe("");
+    expect(resource?.description).toBe("Brave Search API - Web / Search");
+    expect(decoded.accepted).toEqual(entries[0]);
+  });
+
+  it("decode_tolerates_a_payload_without_a_resource", () => {
+    const entries = offersFor(true, "/res/v1/web/search");
+    const decoded = decodePayment(
+      paymentHeaders({ accepted: entries[0], payload: { authorization: AUTHORIZATION } }),
+    );
+    if (decoded === undefined) {
+      throw new Error("the payment decodes");
+    }
+    expect((decoded.payload as { resource?: unknown }).resource).toBeUndefined();
+  });
+
+  it("the_verify_call_carries_a_vacant_resource_url", async () => {
+    // A real client echoes the challenge's resource back, query string
+    // included. The rail relays the decoded payload to the facilitator, so a
+    // recording stand-in reads exactly what the SDK would serialize.
+    const config = testConfig();
+    const built = client(
+      config.x402 ?? { facilitatorUrl: "http://facilitator.invalid", cdp: undefined },
+      config.allowTestnet,
+    );
+    let forwarded: { resource?: { url?: string }; accepted?: unknown } | undefined;
+    built.facilitator = {
+      verify: async (payload: PaymentPayload) => {
+        forwarded = payload as { resource?: { url?: string }; accepted?: unknown };
+        return { isValid: true };
+      },
+      settle: async () => ({
+        success: true,
+        transaction: "0xtxhash",
+        network: "eip155:84532",
+      }),
+    } as unknown as HTTPFacilitatorClient;
+
+    const entries = offersFor(true, "/res/v1/web/search");
+    const response = await handle(
+      built,
+      undefined,
+      new Metrics(),
+      "/res/v1/web/search",
+      paymentHeaders({
+        x402Version: 2,
+        resource: {
+          url: "https://bx402.example.com/res/v1/web/search?q=private",
+          description: "Brave Search API - Web / Search",
+        },
+        accepted: entries[0],
+        payload: { authorization: AUTHORIZATION },
+      }),
+      async () => new Response(JSON.stringify({ web: {} }), { status: 200 }),
+    );
+
+    expect(response.status).toBe(200);
+    // The URL the client echoed leaves vacant; the offer it accepted arrives
+    // unchanged.
+    expect(forwarded?.resource?.url).toBe("");
+    expect(forwarded?.accepted).toEqual(entries[0]);
   });
 
   it("a_tampered_offer_matches_nothing_we_advertise", () => {

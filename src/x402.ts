@@ -428,6 +428,11 @@ const EIP3009_NONCE = /^0x[0-9a-fA-F]{64}$/;
  * plausible `authorization` (a permit2 shape, say) is malformed for all of
  * them and is refused here, before it can reach the screener or the
  * facilitator carrying no identity.
+ *
+ * The resource URL the client echoed is blanked before anything leaves for the
+ * facilitator: verification covers the signature and the requirements, neither
+ * of which names the resource, so what was searched stays between the payer
+ * and this service.
  */
 export function decodePayment(headers: Headers):
   | {
@@ -470,6 +475,13 @@ export function decodePayment(headers: Headers):
     return undefined;
   }
   const payer = from.toLowerCase();
+  // A vacant URL is the shape the SDK itself treats as "no resource", so the
+  // field is blanked rather than dropped: any facilitator that expects the key
+  // still finds it, holding nothing.
+  const resource = (payload as { resource?: { url?: unknown } }).resource;
+  if (typeof resource === "object" && resource !== null && typeof resource.url === "string") {
+    resource.url = "";
+  }
   return {
     payload: payload as unknown as PaymentPayload,
     accepted: accepted as PaymentRequirements,
