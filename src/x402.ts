@@ -19,7 +19,7 @@ import type { Offer } from "./discovery.js";
 import { ENDPOINTS, find } from "./endpoints.js";
 import { AppError, jsonError } from "./error.js";
 import { log } from "./log.js";
-import { type Metrics, outcome, step } from "./metrics.js";
+import { type Metrics, type Outcome, outcome, step } from "./metrics.js";
 import type { RestrictedAddressScreener } from "./screener.js";
 
 /**
@@ -314,7 +314,7 @@ export async function handle(
   runSearch: () => Promise<Response>,
 ): Promise<Response> {
   // Every exit below records how the payment ended, so no path goes uncounted.
-  const ended = (label: string, response: Response): Response => {
+  const ended = (label: Outcome, response: Response): Response => {
     metrics.recordPayment(RAIL, endpoint, label);
     return response;
   };
