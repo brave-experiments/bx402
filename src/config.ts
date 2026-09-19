@@ -130,9 +130,7 @@ export interface Config {
  * - `ALLOW_TESTNET` (optional): `true` permits testnet networks, with each rail
  *   deciding what that admits.
  *
- * An absent required variable throws a missing-configuration error. The Rust
- * service also had an invalid-Unicode case per variable; Node hands every
- * environment variable over as a string, so that case cannot arise here.
+ * An absent required variable throws a missing-configuration error.
  */
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): Config {
   const braveSearchApiKey = requireVar(env, "BRAVE_SEARCH_API_KEY");
