@@ -155,21 +155,27 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): Config {
   };
 }
 
-/**
- * Read the x402 rail's settings. The CDP key halves are useless alone, so one
- * without the other is a misconfiguration, not a partial credential.
- */
+/** Read the x402 rail's settings. */
 function x402FromEnv(env: NodeJS.ProcessEnv): X402Config {
+  const cdp = cdpFromEnv(env);
+  return { facilitatorUrl: requireVar(env, "X402_FACILITATOR_URL"), cdp };
+}
+
+/**
+ * Read the Coinbase facilitator credentials, absent when neither half is set.
+ * The halves are useless alone, so one without the other is a misconfiguration,
+ * not a partial credential.
+ */
+function cdpFromEnv(env: NodeJS.ProcessEnv): CdpCredentials | undefined {
   const apiKeyId = optionalVar(env, "CDP_API_KEY_ID");
   const apiKeySecret = optionalVar(env, "CDP_API_KEY_SECRET");
-  if ((apiKeyId === undefined) !== (apiKeySecret === undefined)) {
+  if (apiKeyId !== undefined && apiKeySecret !== undefined) {
+    return { apiKeyId, apiKeySecret };
+  }
+  if (apiKeyId !== undefined || apiKeySecret !== undefined) {
     throw AppError.invalidConfig("CDP_API_KEY_ID and CDP_API_KEY_SECRET must be set together");
   }
-  return {
-    facilitatorUrl: requireVar(env, "X402_FACILITATOR_URL"),
-    cdp:
-      apiKeyId === undefined || apiKeySecret === undefined ? undefined : { apiKeyId, apiKeySecret },
-  };
+  return undefined;
 }
 
 /** Read an optional environment variable, treating unset and empty alike. */
