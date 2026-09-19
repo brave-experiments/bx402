@@ -24,7 +24,7 @@ import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 import type { MppConfig } from "./config.js";
 import type { Offer } from "./discovery.js";
 import { ENDPOINTS, findEndpoint } from "./endpoints.js";
-import { AppError, isRecord, jsonError } from "./error.js";
+import { AppError, describe, isRecord, jsonError } from "./error.js";
 import { log } from "./log.js";
 import { type Metrics, type Outcome, outcome, step } from "./metrics.js";
 import type { RestrictedAddressScreener } from "./screener.js";
@@ -541,9 +541,4 @@ function gatewayError(): Response {
 /** Elapsed seconds since `started`, the unit every duration metric records. */
 function seconds(started: number): number {
   return (performance.now() - started) / 1000;
-}
-
-/** The message of a failure, for one log line. */
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

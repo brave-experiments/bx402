@@ -12,6 +12,7 @@ import { serve } from "@hono/node-server";
 import { Counter, Gauge, Histogram, openMetricsContentType, Registry } from "@prometheus-io/client";
 import { Hono, type MiddlewareHandler } from "hono";
 import { findEndpoint } from "./endpoints.js";
+import { describe } from "./error.js";
 import { log } from "./log.js";
 import { VERSION } from "./version.js";
 
@@ -311,7 +312,7 @@ export function serveMetrics(metrics: Metrics): Promise<never> {
       const exposition = await metrics.render();
       return c.body(exposition, 200, { "content-type": openMetricsContentType });
     } catch (err: unknown) {
-      log.error(`rendering metrics failed: ${err instanceof Error ? err.message : String(err)}`);
+      log.error(`rendering metrics failed: ${describe(err)}`);
       return c.body(null, 500);
     }
   });
