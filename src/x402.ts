@@ -19,7 +19,7 @@ import type { Offer } from "./discovery.js";
 import { ENDPOINTS, findEndpoint } from "./endpoints.js";
 import { AppError, describe, isRecord, jsonError } from "./error.js";
 import { log } from "./log.js";
-import { type Metrics, type Outcome, outcome, step } from "./metrics.js";
+import { type Metrics, type Outcome, outcome, seconds, step } from "./metrics.js";
 import type { RestrictedAddressScreener } from "./screener.js";
 
 /**
@@ -526,9 +526,4 @@ function paymentRejected(detail: string): Response {
 /** A `502` for a payment we could neither verify nor settle through the facilitator. */
 function gatewayError(detail: string): Response {
   return jsonError(502, detail);
-}
-
-/** Elapsed seconds since `started`, the unit every duration metric records. */
-function seconds(started: number): number {
-  return (performance.now() - started) / 1000;
 }

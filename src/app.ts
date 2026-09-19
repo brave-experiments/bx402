@@ -5,7 +5,7 @@ import { CACHE_CONTROL, DISCOVERY_PATH, document, GUIDE_PATH, guide } from "./di
 import { context, dispatch } from "./dispatch.js";
 import { ENDPOINTS } from "./endpoints.js";
 import { AppError, emptyBody } from "./error.js";
-import { endpointLabel, type Metrics, measure } from "./metrics.js";
+import { endpointLabel, type Metrics, measure, seconds } from "./metrics.js";
 import type { RestrictedAddressScreener } from "./screener.js";
 import { search, searchClient } from "./search.js";
 import { VERSION } from "./version.js";
@@ -143,11 +143,6 @@ async function proxy(
     }
     throw err;
   }
-}
-
-/** Elapsed seconds since `started`, the unit every duration metric records. */
-function seconds(started: number): number {
-  return (performance.now() - started) / 1000;
 }
 
 /**

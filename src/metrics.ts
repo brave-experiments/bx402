@@ -265,6 +265,11 @@ export class Metrics {
   }
 }
 
+/** Elapsed seconds since `started`, the unit every duration metric records. */
+export function seconds(started: number): number {
+  return (performance.now() - started) / 1000;
+}
+
 /**
  * The label for a request path: the paid endpoint or free route it names, or
  * `other`. Drawn from the catalog and the fixed set rather than the request,
@@ -295,7 +300,7 @@ export function measure(metrics: Metrics): MiddlewareHandler {
     const method = methodLabel(c.req.method);
     const started = performance.now();
     await next();
-    metrics.recordRequest(endpoint, method, c.res.status, (performance.now() - started) / 1000);
+    metrics.recordRequest(endpoint, method, c.res.status, seconds(started));
   };
 }
 
