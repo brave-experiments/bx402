@@ -28,7 +28,7 @@
 import { HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import type { Config } from "./config.js";
-import { serviceUnavailable } from "./error.js";
+import { describe, serviceUnavailable } from "./error.js";
 import { log } from "./log.js";
 import { type Metrics, screening } from "./metrics.js";
 
@@ -152,14 +152,6 @@ export class RestrictedAddressScreener {
 function isNotFound(err: unknown): boolean {
   const failure = err as { name?: unknown; $metadata?: { httpStatusCode?: unknown } } | undefined;
   return failure?.name === "NotFound" || failure?.$metadata?.httpStatusCode === 404;
-}
-
-/** The message and cause chain of a failure, for one log line. */
-function describe(err: unknown): string {
-  if (!(err instanceof Error)) {
-    return String(err);
-  }
-  return err.cause === undefined ? err.message : `${err.message}: ${describe(err.cause)}`;
 }
 
 /** Outcome of `initScreener`, for the startup log line. */

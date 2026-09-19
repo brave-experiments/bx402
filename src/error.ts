@@ -1,6 +1,7 @@
 /**
- * Typed application errors, the response shapes every module answers with, and
- * the narrowing guard for reading values whose shape the sender controls.
+ * Typed application errors, the response shapes every module answers with, the
+ * narrowing guard for reading values whose shape the sender controls, and the
+ * reader that turns any failure into one log line.
  */
 
 /**
@@ -10,6 +11,18 @@
  */
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+/**
+ * The message of a failure, for one log line. Wrapped errors read out with their
+ * cause chain appended, since the outer message alone often names only the step
+ * that failed.
+ */
+export function describe(err: unknown): string {
+  if (!(err instanceof Error)) {
+    return String(err);
+  }
+  return err.cause === undefined ? err.message : `${err.message}: ${describe(err.cause)}`;
 }
 
 /**

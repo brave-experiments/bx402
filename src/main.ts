@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
 import { app, banner } from "./app.js";
 import { configFromEnv } from "./config.js";
+import { describe } from "./error.js";
 import { initLogging, log } from "./log.js";
 import { Metrics, serveMetrics } from "./metrics.js";
 import { initScreener, statusLine } from "./screener.js";
@@ -66,6 +67,6 @@ async function run(): Promise<void> {
 }
 
 run().catch((err: unknown) => {
-  log.error(err instanceof Error ? err.message : String(err));
+  log.error(describe(err));
   process.exit(1);
 });

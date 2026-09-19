@@ -15,7 +15,7 @@
 import { readFileSync } from "node:fs";
 import type { Context } from "./dispatch.js";
 import { ENDPOINTS, type Endpoint } from "./endpoints.js";
-import { AppError } from "./error.js";
+import { AppError, describe } from "./error.js";
 import * as mpp from "./mpp.js";
 import { VERSION } from "./version.js";
 import * as x402 from "./x402.js";
@@ -147,8 +147,6 @@ export function guide(): string {
   try {
     return readFileSync(new URL("../llms.txt", import.meta.url), "utf8");
   } catch (err: unknown) {
-    throw AppError.invalidConfig(
-      `the buyer's guide llms.txt cannot be read: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    throw AppError.invalidConfig(`the buyer's guide llms.txt cannot be read: ${describe(err)}`);
   }
 }
