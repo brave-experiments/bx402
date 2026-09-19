@@ -169,7 +169,7 @@ export async function client(rail: MppConfig, allowTestnet: boolean): Promise<Cl
   let handler: Handler;
   try {
     handler = buildHandler(rail, network.chain);
-  } catch (err: unknown) {
+  } catch (err) {
     throw AppError.invalidConfig(`MPP: ${describe(err)}`);
   }
   return { handler, charges: charges(chainId) };
@@ -294,7 +294,7 @@ async function getChainId(rpcUrl: string): Promise<number> {
       headersTimeout: CHAIN_QUERY_TIMEOUT_MS,
       bodyTimeout: CHAIN_QUERY_TIMEOUT_MS,
     });
-  } catch (err: unknown) {
+  } catch (err) {
     throw invalid(`eth_chainId query failed: ${describe(err)}`);
   }
   if (response.statusCode < 200 || response.statusCode > 299) {
@@ -304,7 +304,7 @@ async function getChainId(rpcUrl: string): Promise<number> {
   let body: unknown;
   try {
     body = await response.body.json();
-  } catch (err: unknown) {
+  } catch (err) {
     throw invalid(`eth_chainId response is not JSON: ${describe(err)}`);
   }
   const result = (body as { result?: unknown }).result;
@@ -465,7 +465,7 @@ export async function handle(
     // Spread rather than passed straight through, because the SDK takes a plain
     // record here and an interface carries no index signature.
     receipt = await client.handler.broadcastCredential(parsed, { request: { ...charge } });
-  } catch (err: unknown) {
+  } catch (err) {
     metrics.recordPaymentStep(RAIL, step.CHARGE, seconds(started));
     if (endpointUnreachable(err)) {
       log.error(`mpp charge failed: tempo endpoint unreachable: ${describe(err)}`);

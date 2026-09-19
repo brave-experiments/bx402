@@ -146,7 +146,7 @@ function operation(ctx: Context, endpoint: Endpoint): Operation {
 export function guide(): string {
   try {
     return readFileSync(new URL("../llms.txt", import.meta.url), "utf8");
-  } catch (err: unknown) {
+  } catch (err) {
     throw AppError.invalidConfig(`the buyer's guide llms.txt cannot be read: ${describe(err)}`);
   }
 }

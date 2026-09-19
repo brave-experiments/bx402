@@ -59,7 +59,7 @@ export async function search(
       },
       signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
     });
-  } catch (err: unknown) {
+  } catch (err) {
     throw AppError.upstream(transportFailure(err));
   }
 

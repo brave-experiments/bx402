@@ -110,7 +110,7 @@ export class RestrictedAddressScreener {
     let outcome: Screening;
     try {
       outcome = await this.screen(identifier);
-    } catch (err: unknown) {
+    } catch (err) {
       this.metrics.recordScreening(screening.ERROR);
       log.error(`address screening failed: ${describe(err)}`);
       return serviceUnavailable();
@@ -137,7 +137,7 @@ export class RestrictedAddressScreener {
       });
       // Key exists, so the address is on the list.
       return "blocked";
-    } catch (err: unknown) {
+    } catch (err) {
       // A 404 is the only way to be allowed.
       if (isNotFound(err)) {
         return "allowed";
@@ -205,7 +205,7 @@ export async function initWith(
   // work. On failure the real cause travels as the cause of this error.
   try {
     await screener.headKey(CANARY_KEY, STARTUP_TIMEOUT_MS);
-  } catch (err: unknown) {
+  } catch (err) {
     throw new Error(`restricted address screening probe failed for bucket ${bucket}`, {
       cause: err,
     });
