@@ -185,7 +185,7 @@ export function client(rail: X402Config, allowTestnet: boolean): Client {
     // Parsed only to reject a URL we could never call; the string is passed on
     // as configured, so the facilitator sees exactly the base it was given.
     url = new URL(rail.facilitatorUrl);
-  } catch (err: unknown) {
+  } catch (err) {
     throw AppError.invalidConfig(`X402_FACILITATOR_URL: ${describe(err)}`);
   }
   // A signed CDP token sent elsewhere would let that host replay it against CDP
@@ -362,7 +362,7 @@ export async function handle(
     let verified: { isValid: boolean };
     try {
       verified = await client.facilitator.verify(payload, offer);
-    } catch (err: unknown) {
+    } catch (err) {
       metrics.recordPaymentStep(RAIL, step.VERIFY, seconds(verifyStarted));
       log.error(`x402 facilitator verify failed: ${describe(err)}`);
       return ended(outcome.NETWORK_UNAVAILABLE, gatewayError("payment facilitator unavailable"));
@@ -383,7 +383,7 @@ export async function handle(
     let receipt: { success: boolean };
     try {
       receipt = await client.facilitator.settle(payload, offer);
-    } catch (err: unknown) {
+    } catch (err) {
       metrics.recordPaymentStep(RAIL, step.SETTLE, seconds(settleStarted));
       log.error(`x402 facilitator settle failed: ${describe(err)}`);
       return ended(outcome.SETTLE_FAILED, gatewayError(SETTLE_FAILED));
